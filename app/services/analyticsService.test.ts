@@ -13,7 +13,13 @@ vi.mock("~/db", () => ({
 }));
 
 // Import after mock so the module picks up our test db
-import { parseRange, getInstructorOverview } from "./analyticsService";
+import {
+  parseRange,
+  getInstructorOverview,
+  getRevenueSeries,
+  getCourseSummaries,
+  getRevenueByCountry,
+} from "./analyticsService";
 
 const NOW = new Date("2026-03-15T10:30:00.000Z");
 // 30d around NOW: current [2026-02-14, 2026-03-16), previous [2026-01-15, 2026-02-14)
@@ -523,6 +529,233 @@ describe("analyticsService", () => {
       );
 
       expect(completion).toEqual({ completed: 0, enrolled: 0, rate: null });
+    });
+  });
+
+  describe("getRevenueSeries", () => {
+    it("buckets 7d by UTC day and fills days without sales with zero", () => {
+      const student = createStudent();
+      purchase(student.id, base.course.id, 1000, "2026-03-09T00:00:00.000Z");
+      purchase(student.id, base.course.id, 500, "2026-03-11T23:59:59.000Z");
+      purchase(student.id, base.course.id, 250, "2026-03-11T08:00:00.000Z");
+      purchase(student.id, base.course.id, 9999, "2026-03-08T23:59:59.000Z");
+
+      const series = getRevenueSeries(
+        { instructorId: base.instructor.id },
+        parseRange("7d", NOW)
+      );
+
+      expect(series).toEqual([
+        { bucketStart: "2026-03-09", revenueCents: 1000 },
+        { bucketStart: "2026-03-10", revenueCents: 0 },
+        { bucketStart: "2026-03-11", revenueCents: 750 },
+        { bucketStart: "2026-03-12", revenueCents: 0 },
+        { bucketStart: "2026-03-13", revenueCents: 0 },
+        { bucketStart: "2026-03-14", revenueCents: 0 },
+        { bucketStart: "2026-03-15", revenueCents: 0 },
+      ]);
+    });
+
+    it("buckets 12m by UTC month, zero-filled across all twelve months", () => {
+      const student = createStudent();
+      purchase(student.id, base.course.id, 1000, "2025-04-01T00:00:00.000Z");
+      purchase(student.id, base.course.id, 300, "2026-03-31T23:59:59.000Z");
+      purchase(student.id, base.course.id, 200, "2026-03-01T00:00:00.000Z");
+      purchase(student.id, base.course.id, 9999, "2025-03-31T23:59:59.000Z");
+
+      const series = getRevenueSeries(
+        { instructorId: base.instructor.id },
+        parseRange("12m", NOW)
+      );
+
+      expect(series.map((b) => b.bucketStart)).toEqual([
+        "2025-04-01",
+        "2025-05-01",
+        "2025-06-01",
+        "2025-07-01",
+        "2025-08-01",
+        "2025-09-01",
+        "2025-10-01",
+        "2025-11-01",
+        "2025-12-01",
+        "2026-01-01",
+        "2026-02-01",
+        "2026-03-01",
+      ]);
+      expect(series[0].revenueCents).toBe(1000);
+      expect(series[11].revenueCents).toBe(500);
+      expect(series.slice(1, 11).every((b) => b.revenueCents === 0)).toBe(true);
+    });
+
+    it("runs all-time monthly buckets from the first sale's month to now", () => {
+      const student = createStudent();
+      purchase(student.id, base.course.id, 1000, "2025-12-20T00:00:00.000Z");
+      purchase(student.id, base.course.id, 400, "2026-03-02T00:00:00.000Z");
+
+      const series = getRevenueSeries(
+        { instructorId: base.instructor.id },
+        parseRange("all", NOW)
+      );
+
+      expect(series).toEqual([
+        { bucketStart: "2025-12-01", revenueCents: 1000 },
+        { bucketStart: "2026-01-01", revenueCents: 0 },
+        { bucketStart: "2026-02-01", revenueCents: 0 },
+        { bucketStart: "2026-03-01", revenueCents: 400 },
+      ]);
+    });
+
+    it("has no buckets all-time when there have been no sales", () => {
+      const series = getRevenueSeries(
+        { instructorId: base.instructor.id },
+        parseRange("all", NOW)
+      );
+
+      expect(series).toEqual([]);
+    });
+
+    it("scopes to a single course", () => {
+      const student = createStudent();
+      const other = createCourse();
+      purchase(student.id, base.course.id, 1000, "2026-03-15T00:00:00.000Z");
+      purchase(student.id, other.id, 50, "2026-03-15T00:00:00.000Z");
+
+      const series = getRevenueSeries(
+        { courseId: other.id },
+        parseRange("7d", NOW)
+      );
+
+      expect(series.at(-1)).toEqual({
+        bucketStart: "2026-03-15",
+        revenueCents: 50,
+      });
+      expect(series.reduce((sum, b) => sum + b.revenueCents, 0)).toBe(50);
+    });
+  });
+
+  describe("getCourseSummaries", () => {
+    function rate(userId: number, courseId: number, rating: number) {
+      testDb
+        .insert(schema.courseRatings)
+        .values({ userId, courseId, rating })
+        .run();
+    }
+
+    it("summarises each course's range revenue and enrollments, all-time completion and rating", () => {
+      const [ann, bob, cat] = [
+        createStudent(),
+        createStudent(),
+        createStudent(),
+      ];
+      const course = base.course;
+      const lesson1 = addLesson(course.id);
+      const lesson2 = addLesson(course.id);
+      const inRange = "2026-03-01T00:00:00.000Z";
+      const beforeRange = "2025-06-01T00:00:00.000Z";
+
+      purchase(ann.id, course.id, 4000, inRange);
+      purchase(bob.id, course.id, 2500, inRange);
+      purchase(cat.id, course.id, 9999, beforeRange);
+      enroll(ann.id, course.id, inRange);
+      enroll(bob.id, course.id, inRange);
+      enroll(cat.id, course.id, beforeRange);
+      // Cat finished every lesson long ago; Ann finished one of two.
+      completeLesson(cat.id, lesson1.id, beforeRange);
+      completeLesson(cat.id, lesson2.id, beforeRange);
+      completeLesson(ann.id, lesson1.id, inRange);
+      rate(ann.id, course.id, 5);
+      rate(bob.id, course.id, 4);
+      rate(cat.id, course.id, 2);
+
+      const summaries = getCourseSummaries(base.instructor.id, THIRTY_DAYS());
+
+      expect(summaries).toEqual([
+        {
+          courseId: course.id,
+          title: course.title,
+          status: schema.CourseStatus.Published,
+          revenue: 6500,
+          enrollments: 2,
+          completion: { completed: 1, enrolled: 3, rate: 1 / 3 },
+          rating: { average: 11 / 3, count: 3 },
+        },
+      ]);
+    });
+
+    it("lists archived and empty courses with zeros, but not drafts or other instructors' courses", () => {
+      const archived = createCourse({
+        title: "Archived Course",
+        status: schema.CourseStatus.Archived,
+      });
+      createCourse({
+        title: "Draft Course",
+        status: schema.CourseStatus.Draft,
+      });
+      createCourse({ title: "Theirs", instructorId: createInstructor().id });
+      const student = createStudent();
+      purchase(student.id, archived.id, 1200, "2026-03-01T00:00:00.000Z");
+
+      const summaries = getCourseSummaries(base.instructor.id, THIRTY_DAYS());
+
+      expect(summaries).toEqual([
+        {
+          courseId: archived.id,
+          title: "Archived Course",
+          status: schema.CourseStatus.Archived,
+          revenue: 1200,
+          enrollments: 0,
+          completion: { completed: 0, enrolled: 0, rate: null },
+          rating: { average: null, count: 0 },
+        },
+        {
+          courseId: base.course.id,
+          title: base.course.title,
+          status: schema.CourseStatus.Published,
+          revenue: 0,
+          enrollments: 0,
+          completion: { completed: 0, enrolled: 0, rate: null },
+          rating: { average: null, count: 0 },
+        },
+      ]);
+    });
+  });
+
+  describe("getRevenueByCountry", () => {
+    it("totals range revenue per country with its PPP tier, a missing country as Tier 1", () => {
+      const student = createStudent();
+      const course = base.course;
+      const at = "2026-03-01T00:00:00.000Z";
+      purchase(student.id, course.id, 5000, at, "US");
+      purchase(student.id, course.id, 2000, at, "US");
+      purchase(student.id, course.id, 1500, at, "IN");
+      purchase(student.id, course.id, 3500, at, "BR");
+      purchase(student.id, course.id, 600, at, "NG");
+      purchase(student.id, course.id, 800, at, null);
+      purchase(student.id, course.id, 9999, "2025-01-01T00:00:00.000Z", "IN");
+
+      const rows = getRevenueByCountry(base.instructor.id, THIRTY_DAYS());
+
+      expect(rows).toEqual([
+        { country: "US", tier: 1, revenueCents: 7000 },
+        { country: "BR", tier: 2, revenueCents: 3500 },
+        { country: "IN", tier: 3, revenueCents: 1500 },
+        { country: null, tier: 1, revenueCents: 800 },
+        { country: "NG", tier: 4, revenueCents: 600 },
+      ]);
+    });
+
+    it("excludes drafts and other instructors' courses", () => {
+      const student = createStudent();
+      const draft = createCourse({ status: schema.CourseStatus.Draft });
+      const other = createCourse({ instructorId: createInstructor().id });
+      const at = "2026-03-01T00:00:00.000Z";
+      purchase(student.id, base.course.id, 100, at, "GB");
+      purchase(student.id, draft.id, 200, at, "GB");
+      purchase(student.id, other.id, 300, at, "MX");
+
+      const rows = getRevenueByCountry(base.instructor.id, THIRTY_DAYS());
+
+      expect(rows).toEqual([{ country: "GB", tier: 1, revenueCents: 100 }]);
     });
   });
 });

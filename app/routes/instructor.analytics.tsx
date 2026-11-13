@@ -3,13 +3,26 @@ import { AlertTriangle, BarChart3, Plus } from "lucide-react";
 import type { Route } from "./+types/instructor.analytics";
 import { requireInstructorOrAdmin } from "~/lib/access.server";
 import { getCoursesByInstructor } from "~/services/courseService";
-import { getInstructorOverview, parseRange } from "~/services/analyticsService";
-import { HeadlineCards, RangeSelector } from "~/components/analytics";
+import {
+  getCourseSummaries,
+  getInstructorOverview,
+  getRevenueByCountry,
+  getRevenueSeries,
+  parseRange,
+} from "~/services/analyticsService";
+import {
+  CountryRevenueTable,
+  CourseSummaryTable,
+  HeadlineCards,
+  RangeSelector,
+  RevenueChart,
+} from "~/components/analytics";
 import { Button } from "~/components/ui/button";
 
 // ─── Instructor Analytics Overview ───
 // The instructor's home page: headline metrics across all of their published
-// and archived courses, filtered by the `range` search param.
+// and archived courses, a revenue chart, a per-course summary and revenue by
+// country, filtered by the `range` search param.
 
 export function meta() {
   return [{ title: "Analytics — Cadence" }];
@@ -21,20 +34,25 @@ export async function loader({ request, url }: Route.LoaderArgs) {
 
   const hasCourses = getCoursesByInstructor(userId).length > 0;
   if (!hasCourses) {
-    return { hasCourses, range: range.key, metrics: null };
+    return { hasCourses, range: range.key, metrics: null, report: null };
   }
 
   return {
     hasCourses,
     range: range.key,
     metrics: getInstructorOverview(userId, range),
+    report: {
+      revenueSeries: getRevenueSeries({ instructorId: userId }, range),
+      courseSummaries: getCourseSummaries(userId, range),
+      countries: getRevenueByCountry(userId, range),
+    },
   };
 }
 
 export default function InstructorAnalytics({
   loaderData,
 }: Route.ComponentProps) {
-  const { hasCourses, range, metrics } = loaderData;
+  const { hasCourses, range, metrics, report } = loaderData;
   const [searchParams] = useSearchParams();
 
   return (
@@ -51,8 +69,19 @@ export default function InstructorAnalytics({
         )}
       </div>
 
-      {metrics ? (
-        <HeadlineCards metrics={metrics} />
+      {metrics && report ? (
+        <div className="space-y-4 sm:space-y-6">
+          <HeadlineCards metrics={metrics} />
+          <RevenueChart series={report.revenueSeries} range={range} />
+          <div className="grid gap-4 sm:gap-6 lg:grid-cols-3">
+            <div className="min-w-0 lg:col-span-2">
+              <CourseSummaryTable rows={report.courseSummaries} range={range} />
+            </div>
+            <div className="min-w-0">
+              <CountryRevenueTable rows={report.countries} range={range} />
+            </div>
+          </div>
+        </div>
       ) : (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <BarChart3 className="mb-4 size-12 text-muted-foreground/50" />

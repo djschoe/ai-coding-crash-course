@@ -5,7 +5,9 @@
 
 import { and, eq, inArray, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { db } from "~/db";
+import { getTierForCountry, type PppTier } from "~/lib/ppp";
 import {
+  courseRatings,
   courses,
   CourseStatus,
   enrollments,
@@ -345,4 +347,202 @@ export function getInstructorOverview(
     activeStudents: getActiveStudents(scope, range),
     completion: getCompletionRate(scope),
   };
+}
+
+// ─── Revenue series ───
+
+export interface RevenueBucket {
+  /** UTC date of the bucket's first day, "YYYY-MM-DD" (day 01 for months). */
+  bucketStart: string;
+  /** Integer cents (USD). */
+  revenueCents: number;
+}
+
+/** The UTC day or month starts in [start, end), as "YYYY-MM-DD". */
+function bucketStarts(
+  bucket: ParsedRange["bucket"],
+  start: string,
+  end: string
+): string[] {
+  const starts: string[] = [];
+  const at = new Date(start);
+  if (bucket === "month") at.setUTCDate(1);
+  while (at.toISOString() < end) {
+    starts.push(at.toISOString().slice(0, 10));
+    if (bucket === "day") at.setUTCDate(at.getUTCDate() + 1);
+    else at.setUTCMonth(at.getUTCMonth() + 1);
+  }
+  return starts;
+}
+
+/**
+ * Revenue per UTC day (7d, 30d) or month (12m, all) across the current
+ * window, with empty buckets filled with zero. All-time runs from the month
+ * of the first sale, so it is empty when there are no sales. One query.
+ */
+export function getRevenueSeries(
+  scope: AnalyticsScope,
+  range: ParsedRange
+): RevenueBucket[] {
+  // "YYYY-MM-DD" for days; "YYYY-MM" || "-01" for months.
+  const bucketStart =
+    range.bucket === "day"
+      ? sql<string>`substr(${purchases.createdAt}, 1, 10)`
+      : sql<string>`substr(${purchases.createdAt}, 1, 7) || '-01'`;
+  const rows = db
+    .select({
+      bucketStart,
+      revenueCents: sql<number>`sum(${purchases.amountPaid})`,
+    })
+    .from(purchases)
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(and(inScope(scope), inWindow(purchases.createdAt, range.current)))
+    .groupBy(bucketStart)
+    .all();
+
+  const revenueByBucket = new Map(
+    rows.map((row) => [row.bucketStart, row.revenueCents])
+  );
+  // All-time starts at the first sale's bucket; with no sales there are none.
+  const start =
+    range.current.start ?? rows.map((row) => row.bucketStart).sort()[0] ?? null;
+  if (start === null) return [];
+
+  return bucketStarts(range.bucket, start, range.current.end).map((at) => ({
+    bucketStart: at,
+    revenueCents: revenueByBucket.get(at) ?? 0,
+  }));
+}
+
+// ─── Course summaries ───
+
+export interface CourseSummary {
+  courseId: number;
+  title: string;
+  status: CourseStatus;
+  /** Integer cents (USD) in the range. */
+  revenue: number;
+  /** New enrollments in the range. */
+  enrollments: number;
+  /** All-time, same definition as the completion card. */
+  completion: CompletionRate;
+  /** All-time; `average` is null with no ratings. */
+  rating: { average: number | null; count: number };
+}
+
+/**
+ * One row per published or archived course of the instructor, ordered by
+ * title. Two queries: the per-course totals and the completion counts.
+ */
+export function getCourseSummaries(
+  instructorId: number,
+  range: ParsedRange
+): CourseSummary[] {
+  const scope: AnalyticsScope = { instructorId };
+
+  const revenue = db
+    .select({
+      courseId: purchases.courseId,
+      total: sql<number>`sum(${purchases.amountPaid})`.as("revenue_total"),
+    })
+    .from(purchases)
+    .where(inWindow(purchases.createdAt, range.current))
+    .groupBy(purchases.courseId)
+    .as("revenue");
+
+  const enrolled = db
+    .select({
+      courseId: enrollments.courseId,
+      total: sql<number>`count(*)`.as("enrollment_total"),
+    })
+    .from(enrollments)
+    .where(inWindow(enrollments.enrolledAt, range.current))
+    .groupBy(enrollments.courseId)
+    .as("enrolled");
+
+  const ratings = db
+    .select({
+      courseId: courseRatings.courseId,
+      average: sql<number>`avg(${courseRatings.rating})`.as("rating_average"),
+      count: sql<number>`count(*)`.as("rating_count"),
+    })
+    .from(courseRatings)
+    .groupBy(courseRatings.courseId)
+    .as("ratings");
+
+  const rows = db
+    .select({
+      courseId: courses.id,
+      title: courses.title,
+      status: courses.status,
+      revenue: sql<number>`coalesce(${revenue.total}, 0)`,
+      enrollments: sql<number>`coalesce(${enrolled.total}, 0)`,
+      ratingAverage: sql<number | null>`${ratings.average}`,
+      ratingCount: sql<number>`coalesce(${ratings.count}, 0)`,
+    })
+    .from(courses)
+    .leftJoin(revenue, eq(revenue.courseId, courses.id))
+    .leftJoin(enrolled, eq(enrolled.courseId, courses.id))
+    .leftJoin(ratings, eq(ratings.courseId, courses.id))
+    .where(inScope(scope))
+    .orderBy(courses.title)
+    .all();
+
+  const completionByCourse = new Map(
+    getCompletionByCourse(scope).map((row) => [row.courseId, row])
+  );
+
+  return rows.map((row) => {
+    const completion = completionByCourse.get(row.courseId);
+    return {
+      courseId: row.courseId,
+      title: row.title,
+      status: row.status,
+      revenue: row.revenue,
+      enrollments: row.enrollments,
+      completion: toCompletionRate(
+        completion?.completed ?? 0,
+        completion?.enrolled ?? 0
+      ),
+      rating: { average: row.ratingAverage, count: row.ratingCount },
+    };
+  });
+}
+
+// ─── Revenue by country ───
+
+export interface CountryRevenue {
+  /** ISO-2 code; null when the purchase recorded no country. */
+  country: string | null;
+  /** PPP tier from the PPP mapping; a missing country is Tier 1. */
+  tier: PppTier;
+  /** Integer cents (USD) in the range. */
+  revenueCents: number;
+}
+
+/** Range revenue per purchase country, highest first. One query. */
+export function getRevenueByCountry(
+  instructorId: number,
+  range: ParsedRange
+): CountryRevenue[] {
+  const revenueCents = sql<number>`sum(${purchases.amountPaid})`;
+  const rows = db
+    .select({ country: purchases.country, revenueCents })
+    .from(purchases)
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(
+      and(
+        inScope({ instructorId }),
+        inWindow(purchases.createdAt, range.current)
+      )
+    )
+    .groupBy(purchases.country)
+    .orderBy(sql`${revenueCents} desc`, purchases.country)
+    .all();
+
+  return rows.map((row) => ({
+    country: row.country,
+    tier: getTierForCountry(row.country),
+    revenueCents: row.revenueCents,
+  }));
 }

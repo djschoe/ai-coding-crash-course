@@ -2146,6 +2146,7 @@ You've completed the Building REST APIs course. You now have the skills to build
 
   let cohortEnrollments = 0;
   let cohortPurchases = 0;
+  let cohortRatings = 0;
 
   /**
    * Enrolls a cohort student and generates their activity: lessons completed
@@ -2237,6 +2238,25 @@ You've completed the Building REST APIs course. You now have the skills to build
         })
         .run();
     }
+
+    // About 60% of students who got past the first lesson leave a rating;
+    // the further they got, the happier they tend to be.
+    if (depth >= 2 && random() < 0.6) {
+      const rating = Math.max(
+        1,
+        Math.min(5, Math.round(2.5 + (2.5 * depth) / total - random() * 1.5))
+      );
+      db.insert(schema.courseRatings)
+        .values({
+          userId,
+          courseId: entry.course.id,
+          rating,
+          createdAt: daysAgoExact(ago),
+          updatedAt: daysAgoExact(ago),
+        })
+        .run();
+      cohortRatings++;
+    }
   }
 
   // Team purchase: a cohort student buys 8 seats of course 1; 5 are redeemed.
@@ -2323,7 +2343,7 @@ You've completed the Building REST APIs course. You now have the skills to build
   }
 
   console.log(
-    `Created analytics cohort: ${cohort.length} students, 2 more courses, ${cohortEnrollments} enrollments, ${cohortPurchases} purchases (incl. a team purchase of 8 seats).`
+    `Created analytics cohort: ${cohort.length} students, 2 more courses, ${cohortEnrollments} enrollments, ${cohortPurchases} purchases (incl. a team purchase of 8 seats), ${cohortRatings} ratings.`
   );
 
   console.log("\n✓ Seed complete!");
@@ -2336,7 +2356,7 @@ You've completed the Building REST APIs course. You now have the skills to build
   );
   console.log("  Quizzes: 3");
   console.log(`  Enrollments: ${7 + cohortEnrollments}`);
-  console.log("  Course ratings: 6");
+  console.log(`  Course ratings: ${6 + cohortRatings}`);
   console.log("  Lesson comments: 15 (4 questions awaiting an answer)");
   console.log(`  Purchases: ${6 + cohortPurchases} (incl. 2 team purchases)`);
   console.log("  Teams: 2 (with 5 and 8 coupons)");

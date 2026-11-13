@@ -5,6 +5,7 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "path";
 import { fileURLToPath } from "url";
 import * as schema from "../app/db/schema";
+import { calculatePppPrice } from "../app/lib/ppp";
 import {
   UserRole,
   CourseStatus,
@@ -29,6 +30,22 @@ function daysAgo(n: number): string {
   const d = new Date();
   d.setDate(d.getDate() - n);
   return d.toISOString();
+}
+
+/** An ISO timestamp a fractional number of days before now. */
+function daysAgoExact(n: number): string {
+  return new Date(Date.now() - n * 86_400_000).toISOString();
+}
+
+/** Deterministic PRNG (mulberry32), so the generated cohort is stable. */
+function createRandom(seed: number) {
+  let a = seed;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 function slugify(title: string): string {
@@ -1913,18 +1930,416 @@ You've completed the Building REST APIs course. You now have the skills to build
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (2 redeemed, 3 available).`
   );
 
+  // ─── Analytics cohort ───
+  // A generated cohort of 50 students spread over the last 12 months, so the
+  // analytics dashboard has trends, comparisons and a realistic funnel. Adds a
+  // second course for each instructor (one paid, one free), purchases from
+  // several PPP countries, a team purchase, varied lesson progress, video
+  // watch events and quiz attempts.
+
+  const random = createRandom(9);
+  const pick = <T>(items: readonly T[]) =>
+    items[Math.floor(random() * items.length)];
+
+  function createSmallCourse(opts: {
+    title: string;
+    description: string;
+    instructorId: number;
+    price: number;
+    createdDaysAgo: number;
+    modules: { title: string; lessons: string[] }[];
+  }) {
+    const [course] = db
+      .insert(schema.courses)
+      .values({
+        title: opts.title,
+        slug: slugify(opts.title),
+        description: opts.description,
+        salesCopy: `## ${opts.title}\n\n${opts.description}`,
+        instructorId: opts.instructorId,
+        categoryId: catBySlug["programming"].id,
+        status: CourseStatus.Published,
+        price: opts.price,
+        createdAt: daysAgo(opts.createdDaysAgo),
+        updatedAt: daysAgo(opts.createdDaysAgo),
+      })
+      .returning()
+      .all();
+
+    const lessonIds: number[] = [];
+    opts.modules.forEach((modData, mi) => {
+      const [mod] = db
+        .insert(schema.modules)
+        .values({
+          courseId: course.id,
+          title: modData.title,
+          position: mi + 1,
+          createdAt: daysAgo(opts.createdDaysAgo),
+        })
+        .returning()
+        .all();
+      modData.lessons.forEach((title, li) => {
+        const [lesson] = db
+          .insert(schema.lessons)
+          .values({
+            moduleId: mod.id,
+            title,
+            content: `# ${title}\n\nLesson content for ${title}.`,
+            position: li + 1,
+            durationMinutes: 8 + ((mi + li) % 4) * 3,
+            createdAt: daysAgo(opts.createdDaysAgo),
+          })
+          .returning()
+          .all();
+        lessonIds.push(lesson.id);
+      });
+    });
+    return { course, lessonIds };
+  }
+
+  const course3 = createSmallCourse({
+    title: "Advanced TypeScript Patterns",
+    description:
+      "Go beyond the basics: conditional and mapped types, type-level programming, and patterns for large codebases.",
+    instructorId: instructor1.id,
+    price: 7999,
+    createdDaysAgo: 400,
+    modules: [
+      {
+        title: "Type-Level Programming",
+        lessons: ["Conditional Types", "Infer", "Mapped Types"],
+      },
+      {
+        title: "Patterns at Scale",
+        lessons: ["Branded Types", "Builder Pattern", "Exhaustive Matching"],
+      },
+      {
+        title: "Wrapping Up",
+        lessons: ["Typing Third-Party Code", "Course Project"],
+      },
+    ],
+  });
+
+  const course4 = createSmallCourse({
+    title: "HTTP Fundamentals",
+    description:
+      "A free primer on how the web talks: requests, responses, status codes, headers and caching.",
+    instructorId: instructor2.id,
+    price: 0,
+    createdDaysAgo: 380,
+    modules: [
+      {
+        title: "Requests and Responses",
+        lessons: ["Anatomy of a Request", "Status Codes", "Headers"],
+      },
+      { title: "Beyond the Basics", lessons: ["Caching", "CORS"] },
+    ],
+  });
+
+  const quizByLesson = new Map([
+    [course1LessonIds[2], { quizId: quiz1.id, options: quiz1OptionIds }],
+    [course1LessonIds[7], { quizId: quiz2.id, options: quiz2OptionIds }],
+    [course2LessonIds[2], { quizId: quiz3.id, options: quiz3OptionIds }],
+  ]);
+
+  type CohortCourse = {
+    course: { id: number; price: number };
+    lessonIds: number[];
+  };
+  const cohortCourse1: CohortCourse = {
+    course: course1,
+    lessonIds: course1LessonIds,
+  };
+  // Weighted: course 1 is the most popular, the new courses the least.
+  const weightedCourses: CohortCourse[] = [
+    cohortCourse1,
+    cohortCourse1,
+    cohortCourse1,
+    { course: course2, lessonIds: course2LessonIds },
+    { course: course2, lessonIds: course2LessonIds },
+    course3,
+    course4,
+  ];
+
+  // Mostly tier 1, with a spread of PPP countries and a few unknown (null).
+  const countries = [
+    "US",
+    "US",
+    "US",
+    "US",
+    "GB",
+    "GB",
+    "DE",
+    "CA",
+    "AU",
+    "BR",
+    "MX",
+    "PL",
+    "IN",
+    "IN",
+    "ZA",
+    "NG",
+    "PK",
+    null,
+  ] as const;
+
+  const firstNames = [
+    "Ava",
+    "Noah",
+    "Mia",
+    "Ethan",
+    "Isla",
+    "Lucas",
+    "Zoe",
+    "Mateo",
+    "Chloe",
+    "Arjun",
+    "Priya",
+    "Kenji",
+    "Amara",
+    "Diego",
+    "Lena",
+    "Omar",
+    "Freya",
+    "Tomasz",
+    "Nia",
+    "Felix",
+    "Sofia",
+    "Ravi",
+    "Hana",
+    "Leo",
+    "Grace",
+  ];
+  const lastNames = [
+    "Nguyen",
+    "Okafor",
+    "Silva",
+    "Kowalski",
+    "Patel",
+    "Müller",
+    "Kim",
+    "Garcia",
+    "Brown",
+    "Haddad",
+    "Sato",
+    "Ivanova",
+    "Mensah",
+    "Rossi",
+  ];
+
+  const cohort = db
+    .insert(schema.users)
+    .values(
+      Array.from({ length: 50 }, (_, i) => ({
+        name: `${firstNames[i % firstNames.length]} ${lastNames[(i * 3) % lastNames.length]}`,
+        email: `cohort${i + 1}@student.dev`,
+        role: UserRole.Student,
+        avatarUrl: `https://api.dicebear.com/9.x/avataaars/svg?seed=cohort${i + 1}`,
+        createdAt: daysAgo(370),
+      }))
+    )
+    .returning()
+    .all();
+
+  /** Days between enrolment and now, skewed towards recent months (growth). */
+  const randomEnrolledDaysAgo = () => 1 + Math.pow(random(), 1.4) * 362;
+
+  let cohortEnrollments = 0;
+  let cohortPurchases = 0;
+
+  /**
+   * Enrolls a cohort student and generates their activity: lessons completed
+   * in course order to a varied depth, watch events and quiz attempts.
+   */
+  function enrollWithActivity(
+    userId: number,
+    entry: CohortCourse,
+    enrolledAgo: number
+  ) {
+    db.insert(schema.enrollments)
+      .values({
+        userId,
+        courseId: entry.course.id,
+        enrolledAt: daysAgoExact(enrolledAgo),
+      })
+      .run();
+    cohortEnrollments++;
+
+    // ~25% finish everything; the rest drop off along the way.
+    const total = entry.lessonIds.length;
+    const depth =
+      random() < 0.25 ? total : Math.floor(Math.pow(random(), 1.5) * total);
+
+    let ago = enrolledAgo;
+    for (let i = 0; i < depth; i++) {
+      ago = Math.max(0.05, ago - random() * Math.min(6, ago / (depth - i + 1)));
+      const lessonId = entry.lessonIds[i];
+      db.insert(schema.videoWatchEvents)
+        .values([
+          {
+            userId,
+            lessonId,
+            eventType: "play",
+            positionSeconds: 0,
+            createdAt: daysAgoExact(ago + 0.01),
+          },
+          {
+            userId,
+            lessonId,
+            eventType: "ended",
+            positionSeconds: 480,
+            createdAt: daysAgoExact(ago + 0.005),
+          },
+        ])
+        .run();
+      db.insert(schema.lessonProgress)
+        .values({
+          userId,
+          lessonId,
+          status: LessonProgressStatus.Completed,
+          completedAt: daysAgoExact(ago),
+        })
+        .run();
+
+      const quiz = quizByLesson.get(lessonId);
+      if (quiz) {
+        const questionCount = new Set(quiz.options.map((o) => o.questionId))
+          .size;
+        const allCorrect = Array.from({ length: questionCount }, (_, q) => q);
+        const attemptAgo = Math.floor(ago);
+        if (random() < 0.35) {
+          // Failed first, then retook
+          recordQuizAttempt(userId, quiz.quizId, quiz.options, [0], attemptAgo);
+        }
+        recordQuizAttempt(
+          userId,
+          quiz.quizId,
+          quiz.options,
+          allCorrect,
+          attemptAgo
+        );
+      }
+    }
+
+    // Stalled on the next lesson: started watching but didn't finish.
+    if (depth < total) {
+      const lessonId = entry.lessonIds[depth];
+      db.insert(schema.lessonProgress)
+        .values({ userId, lessonId, status: LessonProgressStatus.InProgress })
+        .run();
+      db.insert(schema.videoWatchEvents)
+        .values({
+          userId,
+          lessonId,
+          eventType: "pause",
+          positionSeconds: Math.round(random() * 400),
+          createdAt: daysAgoExact(Math.max(0.01, ago - random() * 3)),
+        })
+        .run();
+    }
+  }
+
+  // Team purchase: a cohort student buys 8 seats of course 1; 5 are redeemed.
+  const teamBuyer = cohort[0];
+  const teamPurchasedAgo = 75;
+  const [cohortTeam] = db
+    .insert(schema.teams)
+    .values({ createdAt: daysAgo(teamPurchasedAgo) })
+    .returning()
+    .all();
+  db.insert(schema.teamMembers)
+    .values({
+      teamId: cohortTeam.id,
+      userId: teamBuyer.id,
+      role: TeamMemberRole.Admin,
+      createdAt: daysAgo(teamPurchasedAgo),
+    })
+    .run();
+  const [cohortTeamPurchase] = db
+    .insert(schema.purchases)
+    .values({
+      userId: teamBuyer.id,
+      courseId: course1.id,
+      amountPaid: course1.price * 8,
+      country: "GB",
+      createdAt: daysAgo(teamPurchasedAgo),
+    })
+    .returning()
+    .all();
+  cohortPurchases++;
+
+  const seatHolders = cohort.slice(1, 6);
+  for (let i = 0; i < 8; i++) {
+    const redeemer = seatHolders[i];
+    const redeemedAgo = teamPurchasedAgo - 2 - i * 5;
+    db.insert(schema.coupons)
+      .values({
+        teamId: cohortTeam.id,
+        courseId: course1.id,
+        code: `TEAM-TS-COHORT-${i + 1}`,
+        purchaseId: cohortTeamPurchase.id,
+        createdAt: daysAgo(teamPurchasedAgo),
+        redeemedByUserId: redeemer?.id ?? null,
+        redeemedAt: redeemer ? daysAgo(redeemedAgo) : null,
+      })
+      .run();
+    if (redeemer) {
+      enrollWithActivity(redeemer.id, cohortCourse1, redeemedAgo);
+    }
+  }
+
+  // Everyone but the team buyer buys or joins 1–2 courses; seat holders
+  // sometimes buy one more on top of their team seat.
+  for (const student of cohort.slice(1)) {
+    const isSeatHolder = seatHolders.includes(student);
+    const joined = new Set(isSeatHolder ? [course1.id] : []);
+    const wanted = isSeatHolder
+      ? Number(random() < 0.4)
+      : random() < 0.35
+        ? 2
+        : 1;
+    const country = pick(countries);
+
+    for (let n = 0; n < wanted; n++) {
+      const entry = pick(weightedCourses);
+      if (joined.has(entry.course.id)) continue;
+      joined.add(entry.course.id);
+
+      const ago = randomEnrolledDaysAgo();
+      if (entry.course.price > 0) {
+        db.insert(schema.purchases)
+          .values({
+            userId: student.id,
+            courseId: entry.course.id,
+            amountPaid: calculatePppPrice(entry.course.price, country),
+            country,
+            createdAt: daysAgoExact(ago + 0.001),
+          })
+          .run();
+        cohortPurchases++;
+      }
+      enrollWithActivity(student.id, entry, ago);
+    }
+  }
+
+  console.log(
+    `Created analytics cohort: ${cohort.length} students, 2 more courses, ${cohortEnrollments} enrollments, ${cohortPurchases} purchases (incl. a team purchase of 8 seats).`
+  );
+
   console.log("\n✓ Seed complete!");
-  console.log("  Users: 9 (1 admin, 2 instructors, 6 students)");
+  console.log(
+    `  Users: ${9 + cohort.length} (1 admin, 2 instructors, ${6 + cohort.length} students)`
+  );
   console.log("  Categories: 5");
   console.log(
-    `  Courses: 2 (${course1LessonIds.length} + ${course2LessonIds.length} lessons)`
+    `  Courses: 4 (${course1LessonIds.length} + ${course2LessonIds.length} + ${course3.lessonIds.length} + ${course4.lessonIds.length} lessons)`
   );
   console.log("  Quizzes: 3");
-  console.log("  Enrollments: 7");
+  console.log(`  Enrollments: ${7 + cohortEnrollments}`);
   console.log("  Course ratings: 6");
   console.log("  Lesson comments: 15 (4 questions awaiting an answer)");
-  console.log("  Purchases: 6 (5 individual + 1 team)");
-  console.log("  Teams: 1 (with 5 coupons)");
+  console.log(`  Purchases: ${6 + cohortPurchases} (incl. 2 team purchases)`);
+  console.log("  Teams: 2 (with 5 and 8 coupons)");
 }
 
 seed().catch(console.error);

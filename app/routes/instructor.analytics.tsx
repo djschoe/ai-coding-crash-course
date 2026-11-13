@@ -1,7 +1,15 @@
-import { Link, isRouteErrorResponse, useSearchParams } from "react-router";
+import {
+  Link,
+  data,
+  isRouteErrorResponse,
+  useSearchParams,
+} from "react-router";
 import { AlertTriangle, BarChart3, Plus } from "lucide-react";
 import type { Route } from "./+types/instructor.analytics";
 import { requireInstructorOrAdmin } from "~/lib/access.server";
+import { resolveAnalyticsInstructorId } from "~/lib/analytics-access";
+import { getUserById } from "~/services/userService";
+import { UserRole } from "~/db/schema";
 import { getCoursesByInstructor } from "~/services/courseService";
 import { getInstructorOverview, parseRange } from "~/services/analyticsService";
 import { HeadlineCards, RangeSelector } from "~/components/analytics";
@@ -9,23 +17,34 @@ import { Button } from "~/components/ui/button";
 
 // ─── Instructor Analytics Overview ───
 // The instructor's home page: headline metrics across all of their published
-// and archived courses, filtered by the `range` search param.
+// and archived courses, filtered by the `range` search param. Admins can view
+// any instructor's overview, read-only, with `instructorId`.
 
 export function meta() {
   return [{ title: "Analytics — Cadence" }];
 }
 
 export async function loader({ request, url }: Route.LoaderArgs) {
-  const { userId } = await requireInstructorOrAdmin(request);
+  const viewer = await requireInstructorOrAdmin(request);
+  const userId = resolveAnalyticsInstructorId(
+    viewer,
+    url.searchParams.get("instructorId")
+  );
+  const viewing = userId === viewer.userId ? null : getUserById(userId);
+  if (viewing === undefined || viewing?.role === UserRole.Student) {
+    throw data("Instructor not found.", { status: 404 });
+  }
+  const viewingName = viewing?.name ?? null;
   const range = parseRange(url.searchParams.get("range"));
 
   const hasCourses = getCoursesByInstructor(userId).length > 0;
   if (!hasCourses) {
-    return { hasCourses, range: range.key, metrics: null };
+    return { hasCourses, viewingName, range: range.key, metrics: null };
   }
 
   return {
     hasCourses,
+    viewingName,
     range: range.key,
     metrics: getInstructorOverview(userId, range),
   };
@@ -34,7 +53,7 @@ export async function loader({ request, url }: Route.LoaderArgs) {
 export default function InstructorAnalytics({
   loaderData,
 }: Route.ComponentProps) {
-  const { hasCourses, range, metrics } = loaderData;
+  const { hasCourses, viewingName, range, metrics } = loaderData;
   const [searchParams] = useSearchParams();
 
   return (
@@ -43,7 +62,9 @@ export default function InstructorAnalytics({
         <div>
           <h1 className="text-2xl font-bold sm:text-3xl">Analytics</h1>
           <p className="mt-1 text-muted-foreground">
-            How your published and archived courses are performing
+            {viewingName
+              ? `Viewing ${viewingName}'s published and archived courses (read-only)`
+              : "How your published and archived courses are performing"}
           </p>
         </div>
         {hasCourses && (
@@ -57,15 +78,24 @@ export default function InstructorAnalytics({
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <BarChart3 className="mb-4 size-12 text-muted-foreground/50" />
           <h2 className="text-lg font-medium">No courses yet</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Create a course to start seeing revenue, enrollments and progress.
-          </p>
-          <Link to="/instructor/new" className="mt-4">
-            <Button>
-              <Plus className="mr-2 size-4" />
-              Create Course
-            </Button>
-          </Link>
+          {viewingName ? (
+            <p className="mt-1 text-sm text-muted-foreground">
+              {viewingName} hasn't published any courses yet.
+            </p>
+          ) : (
+            <>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Create a course to start seeing revenue, enrollments and
+                progress.
+              </p>
+              <Link to="/instructor/new" className="mt-4">
+                <Button>
+                  <Plus className="mr-2 size-4" />
+                  Create Course
+                </Button>
+              </Link>
+            </>
+          )}
         </div>
       )}
     </div>

@@ -19,6 +19,7 @@ import {
   getRevenueSeries,
   getCourseSummaries,
   getRevenueByCountry,
+  getCourseAnalytics,
 } from "./analyticsService";
 
 const NOW = new Date("2026-03-15T10:30:00.000Z");
@@ -756,6 +757,75 @@ describe("analyticsService", () => {
       const rows = getRevenueByCountry(base.instructor.id, THIRTY_DAYS());
 
       expect(rows).toEqual([{ country: "GB", tier: 1, revenueCents: 100 }]);
+    });
+  });
+
+  describe("getCourseAnalytics", () => {
+    it("scopes the headline cards to one course, leaving out the instructor's other courses", () => {
+      const [ann, bob, cat] = [
+        createStudent(),
+        createStudent(),
+        createStudent(),
+      ];
+      const course = base.course;
+      const sibling = createCourse();
+      const lesson = addLesson(course.id);
+      const siblingLesson = addLesson(sibling.id);
+      const current = "2026-03-01T00:00:00.000Z";
+      const previous = "2026-02-01T00:00:00.000Z";
+
+      purchase(ann.id, course.id, 4000, current);
+      purchase(bob.id, course.id, 2000, previous);
+      purchase(cat.id, sibling.id, 9999, current);
+      enroll(ann.id, course.id, current);
+      enroll(bob.id, course.id, previous);
+      enroll(cat.id, sibling.id, current);
+      completeLesson(ann.id, lesson.id, current);
+      watchVideo(bob.id, lesson.id, previous);
+      completeLesson(cat.id, siblingLesson.id, current);
+
+      const metrics = getCourseAnalytics(course.id, THIRTY_DAYS());
+
+      expect(metrics).toEqual({
+        revenue: { current: 4000, previous: 2000, change: 1 },
+        enrollments: { current: 1, previous: 1, change: 0 },
+        activeStudents: { current: 1, previous: 1, change: 0 },
+        completion: { completed: 1, enrolled: 2, rate: 0.5 },
+      });
+    });
+
+    it("reports zeros and no revenue buckets for a course with no sales", () => {
+      const quiet = createCourse();
+      const student = createStudent();
+      purchase(student.id, base.course.id, 5000, "2026-03-01T00:00:00.000Z");
+
+      expect(getCourseAnalytics(quiet.id, THIRTY_DAYS())).toEqual({
+        revenue: { current: 0, previous: 0, change: null },
+        enrollments: { current: 0, previous: 0, change: null },
+        activeStudents: { current: 0, previous: 0, change: null },
+        completion: { completed: 0, enrolled: 0, rate: null },
+      });
+      expect(
+        getRevenueSeries({ courseId: quiet.id }, parseRange("all", NOW))
+      ).toEqual([]);
+    });
+
+    it("charts only the course's own revenue", () => {
+      const sibling = createCourse();
+      const student = createStudent();
+      purchase(student.id, base.course.id, 1500, "2026-01-10T00:00:00.000Z");
+      purchase(student.id, sibling.id, 9999, "2026-02-10T00:00:00.000Z");
+
+      const series = getRevenueSeries(
+        { courseId: base.course.id },
+        parseRange("all", NOW)
+      );
+
+      expect(series).toEqual([
+        { bucketStart: "2026-01-01", revenueCents: 1500 },
+        { bucketStart: "2026-02-01", revenueCents: 0 },
+        { bucketStart: "2026-03-01", revenueCents: 0 },
+      ]);
     });
   });
 });

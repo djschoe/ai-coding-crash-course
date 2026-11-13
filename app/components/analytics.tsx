@@ -362,7 +362,12 @@ export function CourseSummaryTable({
               {rows.map((row) => (
                 <tr key={row.courseId} className="border-b last:border-0">
                   <td className="py-3 pr-4">
-                    <div className="font-medium">{row.title}</div>
+                    <Link
+                      to={`/instructor/${row.courseId}/analytics?range=${range}`}
+                      className="block w-fit font-medium hover:underline"
+                    >
+                      {row.title}
+                    </Link>
                     <span
                       className={cn(
                         "mt-1 inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize",

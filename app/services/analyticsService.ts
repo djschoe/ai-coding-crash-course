@@ -349,6 +349,23 @@ export function getInstructorOverview(
   };
 }
 
+/**
+ * The overview's headline cards scoped to one course. Drafts are excluded
+ * like everywhere else, so a draft course reports zeros.
+ */
+export function getCourseAnalytics(
+  courseId: number,
+  range: ParsedRange
+): HeadlineMetrics {
+  const scope: AnalyticsScope = { courseId };
+  return {
+    revenue: getRevenue(scope, range),
+    enrollments: getEnrollments(scope, range),
+    activeStudents: getActiveStudents(scope, range),
+    completion: getCompletionRate(scope),
+  };
+}
+
 // ─── Revenue series ───
 
 export interface RevenueBucket {

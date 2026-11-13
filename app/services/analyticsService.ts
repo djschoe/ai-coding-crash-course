@@ -563,3 +563,174 @@ export function getRevenueByCountry(
     revenueCents: row.revenueCents,
   }));
 }
+
+// ─── Lesson funnel ───
+
+export interface FunnelStep {
+  lessonId: number;
+  title: string;
+  /** Currently enrolled students who have completed this lesson. */
+  completed: number;
+  /** All currently enrolled students. */
+  enrolled: number;
+}
+
+export interface LessonFunnel {
+  /** Currently enrolled students (all time). */
+  enrolled: number;
+  /** Current lessons in module, then lesson, position order. */
+  lessons: FunnelStep[];
+  /**
+   * The lesson with the largest drop in completions from the lesson before
+   * it; the earliest wins ties. null when no lesson drops.
+   */
+  largestDropLessonId: number | null;
+}
+
+/**
+ * All-time lesson drop-off for one course. Draft courses report no
+ * enrollments. Two queries: the enrolled total and the per-lesson counts.
+ */
+export function getLessonFunnel(courseId: number): LessonFunnel {
+  const scope: AnalyticsScope = { courseId };
+
+  const enrolledRow = db
+    .select({ total: sql<number>`count(*)` })
+    .from(enrollments)
+    .innerJoin(courses, eq(enrollments.courseId, courses.id))
+    .where(inScope(scope))
+    .get();
+  const enrolled = enrolledRow?.total ?? 0;
+
+  // Completions by currently enrolled students only.
+  const completions = db
+    .select({
+      lessonId: lessonProgress.lessonId,
+      total: sql<number>`count(distinct ${lessonProgress.userId})`.as(
+        "completion_total"
+      ),
+    })
+    .from(lessonProgress)
+    .innerJoin(
+      enrollments,
+      and(
+        eq(enrollments.userId, lessonProgress.userId),
+        eq(enrollments.courseId, courseId)
+      )
+    )
+    .where(eq(lessonProgress.status, LessonProgressStatus.Completed))
+    .groupBy(lessonProgress.lessonId)
+    .as("completions");
+
+  const rows = db
+    .select({
+      lessonId: lessons.id,
+      title: lessons.title,
+      completed: sql<number>`coalesce(${completions.total}, 0)`,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .leftJoin(completions, eq(completions.lessonId, lessons.id))
+    .where(eq(modules.courseId, courseId))
+    .orderBy(modules.position, lessons.position, lessons.id)
+    .all();
+
+  // Drafts are out of scope, so they report no completions either.
+  const steps = rows.map((row) => ({
+    lessonId: row.lessonId,
+    title: row.title,
+    completed: enrolled ? row.completed : 0,
+    enrolled,
+  }));
+
+  let largestDropLessonId: number | null = null;
+  let largestDrop = 0;
+  for (let i = 1; i < steps.length; i++) {
+    const drop = steps[i - 1].completed - steps[i].completed;
+    if (drop > largestDrop) {
+      largestDrop = drop;
+      largestDropLessonId = steps[i].lessonId;
+    }
+  }
+
+  return { enrolled, lessons: steps, largestDropLessonId };
+}
+
+// ─── Quiz pass rates ───
+
+export interface QuizPassRate {
+  quizId: number;
+  title: string;
+  lessonTitle: string;
+  attempts: number;
+  /** Distinct students who attempted the quiz. */
+  students: number;
+  /** Passing attempts. */
+  passed: number;
+  /** passed / attempts; null with no attempts. */
+  passRate: number | null;
+}
+
+/**
+ * All-time attempt stats for each quiz in a published or archived course,
+ * in module, then lesson, position order. One query.
+ */
+export function getQuizPassRates(courseId: number): QuizPassRate[] {
+  const rows = db
+    .select({
+      quizId: quizzes.id,
+      title: quizzes.title,
+      lessonTitle: lessons.title,
+      attempts: sql<number>`count(${quizAttempts.id})`,
+      students: sql<number>`count(distinct ${quizAttempts.userId})`,
+      passed: sql<number>`coalesce(sum(case when ${quizAttempts.passed} then 1 else 0 end), 0)`,
+    })
+    .from(quizzes)
+    .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .innerJoin(courses, eq(modules.courseId, courses.id))
+    .leftJoin(quizAttempts, eq(quizAttempts.quizId, quizzes.id))
+    .where(inScope({ courseId }))
+    .groupBy(quizzes.id)
+    .orderBy(modules.position, lessons.position, quizzes.id)
+    .all();
+
+  return rows.map((row) => ({
+    ...row,
+    passRate: row.attempts ? row.passed / row.attempts : null,
+  }));
+}
+
+// ─── Rating breakdown ───
+
+export interface RatingBreakdown {
+  total: number;
+  /** null with no ratings. */
+  average: number | null;
+  /** 5★ down to 1★; star values nobody gave have count 0. */
+  counts: { stars: 1 | 2 | 3 | 4 | 5; count: number }[];
+}
+
+const STAR_VALUES = [5, 4, 3, 2, 1] as const;
+
+/** All-time count of each star rating for one course. One query. */
+export function getRatingBreakdown(courseId: number): RatingBreakdown {
+  const rows = db
+    .select({
+      rating: courseRatings.rating,
+      count: sql<number>`count(*)`,
+    })
+    .from(courseRatings)
+    .where(eq(courseRatings.courseId, courseId))
+    .groupBy(courseRatings.rating)
+    .all();
+
+  const byStars = new Map(rows.map((row) => [row.rating, row.count]));
+  const counts = STAR_VALUES.map((stars) => ({
+    stars,
+    count: byStars.get(stars) ?? 0,
+  }));
+  const total = counts.reduce((sum, c) => sum + c.count, 0);
+  const sumOfStars = counts.reduce((sum, c) => sum + c.stars * c.count, 0);
+  return { total, average: total ? sumOfStars / total : null, counts };
+}

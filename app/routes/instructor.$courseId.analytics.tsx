@@ -10,20 +10,27 @@ import { requireInstructorOrAdmin } from "~/lib/access.server";
 import { getCourseById } from "~/services/courseService";
 import {
   getCourseAnalytics,
+  getLessonFunnel,
+  getQuizPassRates,
+  getRatingBreakdown,
   getRevenueSeries,
   parseRange,
 } from "~/services/analyticsService";
 import { CourseStatus } from "~/db/schema";
 import {
   HeadlineCards,
+  LessonFunnelSection,
+  LowDataHint,
+  QuizPassRatesSection,
   RangeSelector,
+  RatingBreakdownSection,
   RevenueChart,
 } from "~/components/analytics";
 import { Button } from "~/components/ui/button";
 
 // ─── Course Analytics ───
 // One course's headline metrics and revenue chart, filtered by the `range`
-// search param. Like the roster, only the course's instructor or an admin can
+// search param, then its all-time lesson funnel, ratings and quiz pass rates. Like the roster, only the course's instructor or an admin can
 // open it.
 
 export function meta({ loaderData }: Route.MetaArgs) {
@@ -60,11 +67,24 @@ export async function loader({ params, request, url }: Route.LoaderArgs) {
     range: range.key,
     metrics: getCourseAnalytics(courseId, range),
     revenueSeries: getRevenueSeries({ courseId }, range),
+    // All time; these ignore the range.
+    funnel: getLessonFunnel(courseId),
+    ratings: getRatingBreakdown(courseId),
+    quizzes: getQuizPassRates(courseId),
   };
 }
 
 export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
-  const { course, instructorId, range, metrics, revenueSeries } = loaderData;
+  const {
+    course,
+    instructorId,
+    range,
+    metrics,
+    revenueSeries,
+    funnel,
+    ratings,
+    quizzes,
+  } = loaderData;
   const [searchParams] = useSearchParams();
   const overview = new URLSearchParams({ range });
   if (instructorId !== null) overview.set("instructorId", String(instructorId));
@@ -106,6 +126,12 @@ export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
       <div className="space-y-4 sm:space-y-6">
         <HeadlineCards metrics={metrics} />
         <RevenueChart series={revenueSeries} range={range} />
+        <LowDataHint enrolled={funnel.enrolled} />
+        <LessonFunnelSection funnel={funnel} />
+        <div className="grid gap-4 sm:gap-6 lg:grid-cols-2">
+          <RatingBreakdownSection breakdown={ratings} />
+          <QuizPassRatesSection quizzes={quizzes} />
+        </div>
       </div>
     </div>
   );

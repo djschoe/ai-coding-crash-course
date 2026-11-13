@@ -20,6 +20,9 @@ import {
   getCourseSummaries,
   getRevenueByCountry,
   getCourseAnalytics,
+  getLessonFunnel,
+  getQuizPassRates,
+  getRatingBreakdown,
 } from "./analyticsService";
 
 const NOW = new Date("2026-03-15T10:30:00.000Z");
@@ -114,6 +117,22 @@ function addLesson(courseId: number, title = "Lesson") {
   return testDb
     .insert(schema.lessons)
     .values({ moduleId: module.id, title, position: 1 })
+    .returning()
+    .get();
+}
+
+function addModule(courseId: number, position: number) {
+  return testDb
+    .insert(schema.modules)
+    .values({ courseId, title: `Module ${position}`, position })
+    .returning()
+    .get();
+}
+
+function addLessonAt(moduleId: number, position: number, title: string) {
+  return testDb
+    .insert(schema.lessons)
+    .values({ moduleId, title, position })
     .returning()
     .get();
 }
@@ -826,6 +845,216 @@ describe("analyticsService", () => {
         { bucketStart: "2026-02-01", revenueCents: 0 },
         { bucketStart: "2026-03-01", revenueCents: 0 },
       ]);
+    });
+  });
+
+  describe("getLessonFunnel", () => {
+    const AT = "2026-03-01T00:00:00.000Z";
+
+    it("lists lessons in module then lesson position order with completed / enrolled counts", () => {
+      const course = base.course;
+      // Created out of order to prove ordering comes from positions.
+      const second = addModule(course.id, 2);
+      const first = addModule(course.id, 1);
+      const c = addLessonAt(second.id, 1, "C");
+      const b = addLessonAt(first.id, 2, "B");
+      const a = addLessonAt(first.id, 1, "A");
+      const [ann, bob, cat] = [
+        createStudent(),
+        createStudent(),
+        createStudent(),
+      ];
+      const outsider = createStudent();
+      for (const s of [ann, bob, cat]) enroll(s.id, course.id, AT);
+      completeLesson(ann.id, a.id, AT);
+      completeLesson(bob.id, a.id, AT);
+      completeLesson(cat.id, a.id, AT);
+      completeLesson(ann.id, b.id, AT);
+      completeLesson(bob.id, b.id, AT);
+      completeLesson(ann.id, c.id, AT);
+      // Not enrolled, so not counted.
+      completeLesson(outsider.id, c.id, AT);
+
+      const funnel = getLessonFunnel(course.id);
+
+      expect(funnel.enrolled).toBe(3);
+      expect(funnel.lessons).toEqual([
+        { lessonId: a.id, title: "A", completed: 3, enrolled: 3 },
+        { lessonId: b.id, title: "B", completed: 2, enrolled: 3 },
+        { lessonId: c.id, title: "C", completed: 1, enrolled: 3 },
+      ]);
+    });
+
+    it("highlights the lesson with the largest drop from the one before, earliest on ties", () => {
+      const course = base.course;
+      const module = addModule(course.id, 1);
+      const lessonsInOrder = [1, 2, 3, 4, 5].map((n) =>
+        addLessonAt(module.id, n, `L${n}`)
+      );
+      const students = Array.from({ length: 6 }, () => createStudent());
+      for (const s of students) enroll(s.id, course.id, AT);
+      // Completions per lesson: 6, 5, 2, 2, 0 -> drops 1, 3, 0, 2.
+      const completedBy = [6, 5, 2, 2, 0];
+      lessonsInOrder.forEach((lesson, i) => {
+        for (const s of students.slice(0, completedBy[i]))
+          completeLesson(s.id, lesson.id, AT);
+      });
+
+      expect(getLessonFunnel(course.id).largestDropLessonId).toBe(
+        lessonsInOrder[2].id
+      );
+    });
+
+    it("picks the earlier lesson when two drops tie", () => {
+      const course = base.course;
+      const module = addModule(course.id, 1);
+      const [a, b, c] = [1, 2, 3].map((n) =>
+        addLessonAt(module.id, n, `L${n}`)
+      );
+      const [ann, bob, cat] = [
+        createStudent(),
+        createStudent(),
+        createStudent(),
+      ];
+      for (const s of [ann, bob, cat]) enroll(s.id, course.id, AT);
+      // 3, 2, 1 -> drops 1, 1.
+      for (const s of [ann, bob, cat]) completeLesson(s.id, a.id, AT);
+      for (const s of [ann, bob]) completeLesson(s.id, b.id, AT);
+      completeLesson(ann.id, c.id, AT);
+
+      expect(getLessonFunnel(course.id).largestDropLessonId).toBe(b.id);
+    });
+
+    it("highlights nothing when completions never drop", () => {
+      const course = base.course;
+      const module = addModule(course.id, 1);
+      const [a, b] = [1, 2].map((n) => addLessonAt(module.id, n, `L${n}`));
+      const student = createStudent();
+      enroll(student.id, course.id, AT);
+      completeLesson(student.id, a.id, AT);
+      completeLesson(student.id, b.id, AT);
+
+      const funnel = getLessonFunnel(course.id);
+      expect(funnel.largestDropLessonId).toBeNull();
+      expect(funnel.lessons.map((l) => l.completed)).toEqual([1, 1]);
+    });
+
+    it("only counts the course's own enrollments", () => {
+      const sibling = createCourse();
+      const module = addModule(base.course.id, 1);
+      const lesson = addLessonAt(module.id, 1, "Only");
+      const [ann, bob] = [createStudent(), createStudent()];
+      enroll(ann.id, base.course.id, AT);
+      // Bob is enrolled elsewhere, not in this course.
+      enroll(bob.id, sibling.id, AT);
+      completeLesson(ann.id, lesson.id, AT);
+      completeLesson(bob.id, lesson.id, AT);
+
+      expect(getLessonFunnel(base.course.id).lessons).toEqual([
+        { lessonId: lesson.id, title: "Only", completed: 1, enrolled: 1 },
+      ]);
+    });
+  });
+
+  describe("getQuizPassRates", () => {
+    function addQuiz(lessonId: number, title: string) {
+      return testDb
+        .insert(schema.quizzes)
+        .values({ lessonId, title, passingScore: 0.7 })
+        .returning()
+        .get();
+    }
+
+    function attempt(userId: number, quizId: number, passed: boolean) {
+      testDb
+        .insert(schema.quizAttempts)
+        .values({ userId, quizId, score: passed ? 0.9 : 0.4, passed })
+        .run();
+    }
+
+    it("reports attempts, unique students and pass rate per quiz in course order", () => {
+      const course = base.course;
+      const module = addModule(course.id, 1);
+      const later = addLessonAt(module.id, 2, "Later");
+      const earlier = addLessonAt(module.id, 1, "Earlier");
+      const finalQuiz = addQuiz(later.id, "Final quiz");
+      const firstQuiz = addQuiz(earlier.id, "First quiz");
+      const [ann, bob] = [createStudent(), createStudent()];
+
+      // Ann fails twice then passes; Bob passes first time.
+      attempt(ann.id, firstQuiz.id, false);
+      attempt(ann.id, firstQuiz.id, false);
+      attempt(ann.id, firstQuiz.id, true);
+      attempt(bob.id, firstQuiz.id, true);
+
+      expect(getQuizPassRates(course.id)).toEqual([
+        {
+          quizId: firstQuiz.id,
+          title: "First quiz",
+          lessonTitle: "Earlier",
+          attempts: 4,
+          students: 2,
+          passed: 2,
+          passRate: 0.5,
+        },
+        {
+          quizId: finalQuiz.id,
+          title: "Final quiz",
+          lessonTitle: "Later",
+          attempts: 0,
+          students: 0,
+          passed: 0,
+          passRate: null,
+        },
+      ]);
+    });
+
+    it("leaves out other courses' quizzes", () => {
+      const sibling = createCourse();
+      const lesson = addLessonAt(addModule(sibling.id, 1).id, 1, "Elsewhere");
+      const quiz = addQuiz(lesson.id, "Other quiz");
+      attempt(createStudent().id, quiz.id, true);
+
+      expect(getQuizPassRates(base.course.id)).toEqual([]);
+    });
+  });
+
+  describe("getRatingBreakdown", () => {
+    function rate(userId: number, courseId: number, rating: number) {
+      testDb
+        .insert(schema.courseRatings)
+        .values({ userId, courseId, rating })
+        .run();
+    }
+
+    it("counts each star value, including the ones nobody gave", () => {
+      const sibling = createCourse();
+      const students = Array.from({ length: 4 }, () => createStudent());
+      rate(students[0].id, base.course.id, 5);
+      rate(students[1].id, base.course.id, 5);
+      rate(students[2].id, base.course.id, 4);
+      rate(students[3].id, base.course.id, 1);
+      // Another course's rating is ignored.
+      rate(students[0].id, sibling.id, 2);
+
+      expect(getRatingBreakdown(base.course.id)).toEqual({
+        total: 4,
+        average: 3.75,
+        counts: [
+          { stars: 5, count: 2 },
+          { stars: 4, count: 1 },
+          { stars: 3, count: 0 },
+          { stars: 2, count: 0 },
+          { stars: 1, count: 1 },
+        ],
+      });
+    });
+
+    it("reports zero counts and no average for an unrated course", () => {
+      const breakdown = getRatingBreakdown(base.course.id);
+      expect(breakdown.total).toBe(0);
+      expect(breakdown.average).toBeNull();
+      expect(breakdown.counts.every((c) => c.count === 0)).toBe(true);
     });
   });
 });

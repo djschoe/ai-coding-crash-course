@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
-import { BarChart3, Star } from "lucide-react";
+import { BarChart3, Info, Star, TrendingDown } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import {
   ChartContainer,
@@ -18,7 +18,10 @@ import type {
   CountryRevenue,
   CourseSummary,
   HeadlineMetrics,
+  LessonFunnel,
+  QuizPassRate,
   RangeKey,
+  RatingBreakdown,
   RevenueBucket,
 } from "~/services/analyticsService";
 
@@ -466,6 +469,187 @@ export function CountryRevenueTable({
                   </td>
                   <td className="py-3 text-right tabular-nums">
                     {formatUsd(row.revenueCents)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+// ─── Per-course sections (all time) ───
+
+/** Below this many enrolled students, per-course figures are flagged as early. */
+export const LOW_DATA_THRESHOLD = 5;
+
+/** A soft caution shown alongside the numbers for courses with few students. */
+export function LowDataHint({ enrolled }: { enrolled: number }) {
+  if (enrolled >= LOW_DATA_THRESHOLD) return null;
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-dashed px-4 py-3 text-sm text-muted-foreground">
+      <Info className="mt-0.5 size-4 shrink-0" />
+      <span>
+        Not enough data yet: only {count(enrolled)} enrolled{" "}
+        {enrolled === 1 ? "student" : "students"}, so treat these figures with
+        caution.
+      </span>
+    </div>
+  );
+}
+
+/** "3 / 7 · 43%", or "0 / 0" when there is nothing to divide by. */
+function countOf(part: number, whole: number) {
+  const base = `${count(part)} / ${count(whole)}`;
+  return whole ? `${base} · ${formatPercent(part / whole)}` : base;
+}
+
+/** Completions per lesson in course order, with the largest drop highlighted. */
+export function LessonFunnelSection({ funnel }: { funnel: LessonFunnel }) {
+  return (
+    <SectionCard
+      title="Lesson drop-off"
+      description="All time: enrolled students who have completed each lesson. Adding lessons can lower the completion rate, since completion counts every current lesson."
+    >
+      {funnel.lessons.length === 0 ? (
+        <EmptyState message="This course has no lessons yet." />
+      ) : (
+        <ol className="space-y-3">
+          {funnel.lessons.map((step, i) => {
+            const isLargestDrop = step.lessonId === funnel.largestDropLessonId;
+            const ratio = step.enrolled ? step.completed / step.enrolled : 0;
+            return (
+              <li
+                key={step.lessonId}
+                className={cn(
+                  "rounded-lg px-3 py-2",
+                  isLargestDrop &&
+                    "bg-amber-50 ring-1 ring-amber-300 dark:bg-amber-900/20 dark:ring-amber-700"
+                )}
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-sm">
+                  <span className="min-w-0 font-medium break-words">
+                    <span className="mr-2 text-muted-foreground tabular-nums">
+                      {i + 1}.
+                    </span>
+                    {step.title}
+                  </span>
+                  <span className="tabular-nums text-muted-foreground">
+                    {countOf(step.completed, step.enrolled)}
+                  </span>
+                </div>
+                <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={cn(
+                      "h-full rounded-full",
+                      isLargestDrop ? "bg-amber-500" : "bg-primary"
+                    )}
+                    style={{ width: `${ratio * 100}%` }}
+                  />
+                </div>
+                {isLargestDrop && (
+                  <p className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-amber-700 dark:text-amber-400">
+                    <TrendingDown className="size-3.5" />
+                    Largest drop from the lesson before
+                  </p>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </SectionCard>
+  );
+}
+
+/** Count of each star value, 5★ first. */
+export function RatingBreakdownSection({
+  breakdown,
+}: {
+  breakdown: RatingBreakdown;
+}) {
+  return (
+    <SectionCard
+      title="Ratings"
+      description={
+        breakdown.average === null
+          ? "All time"
+          : `All time: ${breakdown.average.toFixed(1)} average from ${count(breakdown.total)} ${breakdown.total === 1 ? "rating" : "ratings"}`
+      }
+    >
+      {breakdown.total === 0 ? (
+        <EmptyState message="No ratings yet." />
+      ) : (
+        <ul className="space-y-2">
+          {breakdown.counts.map(({ stars, count: n }) => (
+            <li key={stars} className="flex items-center gap-3 text-sm">
+              <span className="inline-flex w-8 shrink-0 items-center gap-0.5 tabular-nums">
+                {stars}
+                <Star className="size-3.5 fill-amber-400 text-amber-400" />
+              </span>
+              <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-amber-400"
+                  style={{ width: `${(n / breakdown.total) * 100}%` }}
+                />
+              </div>
+              <span className="w-24 shrink-0 text-right tabular-nums text-muted-foreground">
+                {countOf(n, breakdown.total)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </SectionCard>
+  );
+}
+
+/** Attempts, unique students and pass rate for each quiz. */
+export function QuizPassRatesSection({ quizzes }: { quizzes: QuizPassRate[] }) {
+  return (
+    <SectionCard
+      title="Quiz pass rates"
+      description="All time: passing attempts out of all attempts"
+    >
+      {quizzes.length === 0 ? (
+        <EmptyState message="This course has no quizzes." />
+      ) : (
+        <div className="-mx-6 overflow-x-auto px-6">
+          <table className="w-full min-w-[24rem] text-sm">
+            <thead>
+              <tr className="border-b text-left text-muted-foreground">
+                <th className="py-2 pr-4 font-medium">Quiz</th>
+                <th className="py-2 pr-4 text-right font-medium">Attempts</th>
+                <th className="py-2 pr-4 text-right font-medium">Students</th>
+                <th className="py-2 text-right font-medium">Pass rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {quizzes.map((quiz) => (
+                <tr key={quiz.quizId} className="border-b last:border-0">
+                  <td className="py-3 pr-4">
+                    <div className="font-medium">{quiz.title}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {quiz.lessonTitle}
+                    </div>
+                  </td>
+                  <td className="py-3 pr-4 text-right tabular-nums">
+                    {count(quiz.attempts)}
+                  </td>
+                  <td className="py-3 pr-4 text-right tabular-nums">
+                    {count(quiz.students)}
+                  </td>
+                  <td className="py-3 text-right tabular-nums">
+                    <div>
+                      {quiz.passRate === null
+                        ? "—"
+                        : formatPercent(quiz.passRate)}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {count(quiz.passed)} / {count(quiz.attempts)}
+                    </div>
                   </td>
                 </tr>
               ))}

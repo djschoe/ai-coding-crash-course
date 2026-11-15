@@ -693,14 +693,14 @@ export interface QuizPassRate {
   attempts: number;
   /** Distinct students who attempted the quiz. */
   students: number;
-  /** Passing attempts. */
+  /** Distinct students with at least one passing attempt. */
   passed: number;
-  /** passed / attempts; null with no attempts. */
+  /** passed / students, so each student counts once; null with no attempts. */
   passRate: number | null;
 }
 
 /**
- * All-time attempt stats for each quiz in a published or archived course,
+ * All-time stats for each quiz in a published or archived course,
  * in module, then lesson, position order. One query.
  */
 export function getQuizPassRates(courseId: number): QuizPassRate[] {
@@ -712,7 +712,7 @@ export function getQuizPassRates(courseId: number): QuizPassRate[] {
       lessonTitle: inScopeLessons.lessonTitle,
       attempts: sql<number>`count(${quizAttempts.id})`,
       students: sql<number>`count(distinct ${quizAttempts.userId})`,
-      passed: sql<number>`coalesce(sum(case when ${quizAttempts.passed} then 1 else 0 end), 0)`,
+      passed: sql<number>`count(distinct case when ${quizAttempts.passed} then ${quizAttempts.userId} end)`,
     })
     .from(quizzes)
     .innerJoin(inScopeLessons, eq(inScopeLessons.lessonId, quizzes.lessonId))
@@ -727,7 +727,7 @@ export function getQuizPassRates(courseId: number): QuizPassRate[] {
 
   return rows.map((row) => ({
     ...row,
-    passRate: row.attempts ? row.passed / row.attempts : null,
+    passRate: row.students ? row.passed / row.students : null,
   }));
 }
 

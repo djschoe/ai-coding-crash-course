@@ -984,23 +984,30 @@ describe("analyticsService", () => {
       const earlier = addLessonAt(module.id, 1, "Earlier");
       const finalQuiz = addQuiz(later.id, "Final quiz");
       const firstQuiz = addQuiz(earlier.id, "First quiz");
-      const [ann, bob] = [createStudent(), createStudent()];
+      const [ann, bob, cat] = [
+        createStudent(),
+        createStudent(),
+        createStudent(),
+      ];
 
-      // Ann fails twice then passes; Bob passes first time.
+      // Ann fails twice then passes; Bob passes, then passes again; Cat only
+      // fails. Each student counts once: 2 of 3 students have passed.
       attempt(ann.id, firstQuiz.id, false);
       attempt(ann.id, firstQuiz.id, false);
       attempt(ann.id, firstQuiz.id, true);
       attempt(bob.id, firstQuiz.id, true);
+      attempt(bob.id, firstQuiz.id, true);
+      attempt(cat.id, firstQuiz.id, false);
 
       expect(getQuizPassRates(course.id)).toEqual([
         {
           quizId: firstQuiz.id,
           title: "First quiz",
           lessonTitle: "Earlier",
-          attempts: 4,
-          students: 2,
+          attempts: 6,
+          students: 3,
           passed: 2,
-          passRate: 0.5,
+          passRate: 2 / 3,
         },
         {
           quizId: finalQuiz.id,

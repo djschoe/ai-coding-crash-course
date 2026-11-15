@@ -618,7 +618,7 @@ export function QuizPassRatesSection({ quizzes }: { quizzes: QuizPassRate[] }) {
   return (
     <SectionCard
       title="Quiz pass rates"
-      description="All time: passing attempts out of all attempts"
+      description="All time: students who have passed out of students who attempted"
     >
       {quizzes.length === 0 ? (
         <EmptyState message="This course has no quizzes." />
@@ -655,7 +655,7 @@ export function QuizPassRatesSection({ quizzes }: { quizzes: QuizPassRate[] }) {
                         : formatPercent(quiz.passRate)}
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      {formatCount(quiz.passed)} / {formatCount(quiz.attempts)}
+                      {formatCount(quiz.passed)} / {formatCount(quiz.students)}
                     </div>
                   </td>
                 </tr>

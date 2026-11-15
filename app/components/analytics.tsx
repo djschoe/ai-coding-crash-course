@@ -1,7 +1,14 @@
 import type { ReactNode } from "react";
-import { Link } from "react-router";
+import { Link, isRouteErrorResponse } from "react-router";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
-import { BarChart3, Info, Star, TrendingDown } from "lucide-react";
+import {
+  AlertTriangle,
+  BarChart3,
+  Info,
+  Star,
+  TrendingDown,
+} from "lucide-react";
+import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import {
   ChartContainer,
@@ -330,7 +337,7 @@ const STATUS_STYLES: Partial<Record<CourseStatus, string>> = {
   [CourseStatus.Archived]: "bg-muted text-muted-foreground",
 };
 
-const count = (n: number) => n.toLocaleString("en-US");
+const formatCount = (n: number) => n.toLocaleString("en-US");
 
 /** One row per published or archived course. */
 export function CourseSummaryTable({
@@ -384,7 +391,7 @@ export function CourseSummaryTable({
                     {formatUsd(row.revenue)}
                   </td>
                   <td className="py-3 pr-4 text-right tabular-nums">
-                    {count(row.enrollments)}
+                    {formatCount(row.enrollments)}
                   </td>
                   <td className="py-3 pr-4 text-right tabular-nums">
                     <div>
@@ -393,8 +400,8 @@ export function CourseSummaryTable({
                         : formatPercent(row.completion.rate)}
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      {count(row.completion.completed)} /{" "}
-                      {count(row.completion.enrolled)}
+                      {formatCount(row.completion.completed)} /{" "}
+                      {formatCount(row.completion.enrolled)}
                     </div>
                   </td>
                   <td className="py-3 text-right tabular-nums">
@@ -407,7 +414,7 @@ export function CourseSummaryTable({
                           {row.rating.average.toFixed(1)}
                         </div>
                         <div className="text-xs text-muted-foreground">
-                          {count(row.rating.count)}{" "}
+                          {formatCount(row.rating.count)}{" "}
                           {row.rating.count === 1 ? "rating" : "ratings"}
                         </div>
                       </>
@@ -492,7 +499,7 @@ export function LowDataHint({ enrolled }: { enrolled: number }) {
     <div className="flex items-start gap-2 rounded-lg border border-dashed px-4 py-3 text-sm text-muted-foreground">
       <Info className="mt-0.5 size-4 shrink-0" />
       <span>
-        Not enough data yet: only {count(enrolled)} enrolled{" "}
+        Not enough data yet: only {formatCount(enrolled)} enrolled{" "}
         {enrolled === 1 ? "student" : "students"}, so treat these figures with
         caution.
       </span>
@@ -502,7 +509,7 @@ export function LowDataHint({ enrolled }: { enrolled: number }) {
 
 /** "3 / 7 · 43%", or "0 / 0" when there is nothing to divide by. */
 function countOf(part: number, whole: number) {
-  const base = `${count(part)} / ${count(whole)}`;
+  const base = `${formatCount(part)} / ${formatCount(whole)}`;
   return whole ? `${base} · ${formatPercent(part / whole)}` : base;
 }
 
@@ -576,7 +583,7 @@ export function RatingBreakdownSection({
       description={
         breakdown.average === null
           ? "All time"
-          : `All time: ${breakdown.average.toFixed(1)} average from ${count(breakdown.total)} ${breakdown.total === 1 ? "rating" : "ratings"}`
+          : `All time: ${breakdown.average.toFixed(1)} average from ${formatCount(breakdown.total)} ${breakdown.total === 1 ? "rating" : "ratings"}`
       }
     >
       {breakdown.total === 0 ? (
@@ -636,10 +643,10 @@ export function QuizPassRatesSection({ quizzes }: { quizzes: QuizPassRate[] }) {
                     </div>
                   </td>
                   <td className="py-3 pr-4 text-right tabular-nums">
-                    {count(quiz.attempts)}
+                    {formatCount(quiz.attempts)}
                   </td>
                   <td className="py-3 pr-4 text-right tabular-nums">
-                    {count(quiz.students)}
+                    {formatCount(quiz.students)}
                   </td>
                   <td className="py-3 text-right tabular-nums">
                     <div>
@@ -648,7 +655,7 @@ export function QuizPassRatesSection({ quizzes }: { quizzes: QuizPassRate[] }) {
                         : formatPercent(quiz.passRate)}
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      {count(quiz.passed)} / {count(quiz.attempts)}
+                      {formatCount(quiz.passed)} / {formatCount(quiz.attempts)}
                     </div>
                   </td>
                 </tr>
@@ -658,5 +665,65 @@ export function QuizPassRatesSection({ quizzes }: { quizzes: QuizPassRate[] }) {
         </div>
       )}
     </SectionCard>
+  );
+}
+
+// ─── Error boundary ───
+
+function errorText(data: unknown, fallback: string) {
+  return typeof data === "string" ? data : fallback;
+}
+
+/**
+ * The analytics pages' error screen: sign-in and permission messages for 401
+ * and 403, the thrown message for other HTTP errors, and a link back.
+ */
+export function AnalyticsError({
+  error,
+  fallbackMessage,
+  notFoundTitle,
+  backTo,
+  backLabel,
+}: {
+  error: unknown;
+  fallbackMessage: string;
+  /** Title for a 404; without it a 404 shows "Error 404". */
+  notFoundTitle?: string;
+  backTo: string;
+  backLabel: string;
+}) {
+  let title = "Something went wrong";
+  let message = fallbackMessage;
+
+  if (isRouteErrorResponse(error)) {
+    if (error.status === 401) {
+      title = "Sign in required";
+      message = errorText(
+        error.data,
+        "Please select a user from the DevUI panel."
+      );
+    } else if (error.status === 403) {
+      title = "Not allowed";
+      message = errorText(error.data, "You don't have access to this page.");
+    } else {
+      title =
+        error.status === 404 && notFoundTitle
+          ? notFoundTitle
+          : `Error ${error.status}`;
+      message = errorText(error.data, error.statusText);
+    }
+  }
+
+  return (
+    <div className="flex min-h-[50vh] items-center justify-center p-6">
+      <div className="text-center">
+        <AlertTriangle className="mx-auto mb-4 size-12 text-muted-foreground" />
+        <h1 className="mb-2 text-2xl font-bold">{title}</h1>
+        <p className="mb-6 text-muted-foreground">{message}</p>
+        <Link to={backTo}>
+          <Button>{backLabel}</Button>
+        </Link>
+      </div>
+    </div>
   );
 }

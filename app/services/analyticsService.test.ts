@@ -23,6 +23,8 @@ import {
   getLessonFunnel,
   getQuizPassRates,
   getRatingBreakdown,
+  instructorScope,
+  courseScope,
 } from "./analyticsService";
 
 const NOW = new Date("2026-03-15T10:30:00.000Z");
@@ -101,26 +103,6 @@ function enroll(userId: number, courseId: number, enrolledAt: string) {
     .get();
 }
 
-/** Adds a lesson to the course, in a module created on first use. */
-function addLesson(courseId: number, title = "Lesson") {
-  const module =
-    testDb
-      .select()
-      .from(schema.modules)
-      .where(eq(schema.modules.courseId, courseId))
-      .get() ??
-    testDb
-      .insert(schema.modules)
-      .values({ courseId, title: "Module", position: 1 })
-      .returning()
-      .get();
-  return testDb
-    .insert(schema.lessons)
-    .values({ moduleId: module.id, title, position: 1 })
-    .returning()
-    .get();
-}
-
 function addModule(courseId: number, position: number) {
   return testDb
     .insert(schema.modules)
@@ -135,6 +117,17 @@ function addLessonAt(moduleId: number, position: number, title: string) {
     .values({ moduleId, title, position })
     .returning()
     .get();
+}
+
+/** Adds a lesson to the course, in a module created on first use. */
+function addLesson(courseId: number, title = "Lesson") {
+  const module =
+    testDb
+      .select()
+      .from(schema.modules)
+      .where(eq(schema.modules.courseId, courseId))
+      .get() ?? addModule(courseId, 1);
+  return addLessonAt(module.id, 1, title);
 }
 
 function completeLesson(userId: number, lessonId: number, completedAt: string) {
@@ -162,15 +155,35 @@ function watchVideo(userId: number, lessonId: number, createdAt: string) {
     .run();
 }
 
-function attemptQuiz(userId: number, lessonId: number, attemptedAt: string) {
-  const quiz = testDb
+function addQuiz(lessonId: number, title = "Quiz") {
+  return testDb
     .insert(schema.quizzes)
-    .values({ lessonId, title: "Quiz", passingScore: 0.7 })
+    .values({ lessonId, title, passingScore: 0.7 })
     .returning()
     .get();
+}
+
+function attempt(
+  userId: number,
+  quizId: number,
+  passed: boolean,
+  attemptedAt?: string
+) {
   testDb
     .insert(schema.quizAttempts)
-    .values({ userId, quizId: quiz.id, score: 1, passed: true, attemptedAt })
+    .values({ userId, quizId, score: passed ? 0.9 : 0.4, passed, attemptedAt })
+    .run();
+}
+
+/** Adds a quiz to the lesson and a passing attempt on it. */
+function attemptQuiz(userId: number, lessonId: number, attemptedAt: string) {
+  attempt(userId, addQuiz(lessonId).id, true, attemptedAt);
+}
+
+function rate(userId: number, courseId: number, rating: number) {
+  testDb
+    .insert(schema.courseRatings)
+    .values({ userId, courseId, rating })
     .run();
 }
 
@@ -185,6 +198,20 @@ describe("analyticsService", () => {
       const range = parseRange(null, NOW);
 
       expect(range.key).toBe("30d");
+      expect(range.bucket).toBe("day");
+      expect(range.current).toEqual({
+        start: "2026-02-14T00:00:00.000Z",
+        end: "2026-03-16T00:00:00.000Z",
+      });
+      expect(range.previous).toEqual({
+        start: "2026-01-15T00:00:00.000Z",
+        end: "2026-02-14T00:00:00.000Z",
+      });
+    });
+
+    it("compares 30d with the thirty days before it", () => {
+      const range = parseRange("30d", NOW);
+
       expect(range.bucket).toBe("day");
       expect(range.current).toEqual({
         start: "2026-02-14T00:00:00.000Z",
@@ -561,7 +588,7 @@ describe("analyticsService", () => {
       purchase(student.id, base.course.id, 9999, "2026-03-08T23:59:59.000Z");
 
       const series = getRevenueSeries(
-        { instructorId: base.instructor.id },
+        instructorScope(base.instructor.id),
         parseRange("7d", NOW)
       );
 
@@ -584,7 +611,7 @@ describe("analyticsService", () => {
       purchase(student.id, base.course.id, 9999, "2025-03-31T23:59:59.000Z");
 
       const series = getRevenueSeries(
-        { instructorId: base.instructor.id },
+        instructorScope(base.instructor.id),
         parseRange("12m", NOW)
       );
 
@@ -613,7 +640,7 @@ describe("analyticsService", () => {
       purchase(student.id, base.course.id, 400, "2026-03-02T00:00:00.000Z");
 
       const series = getRevenueSeries(
-        { instructorId: base.instructor.id },
+        instructorScope(base.instructor.id),
         parseRange("all", NOW)
       );
 
@@ -627,7 +654,7 @@ describe("analyticsService", () => {
 
     it("has no buckets all-time when there have been no sales", () => {
       const series = getRevenueSeries(
-        { instructorId: base.instructor.id },
+        instructorScope(base.instructor.id),
         parseRange("all", NOW)
       );
 
@@ -641,7 +668,7 @@ describe("analyticsService", () => {
       purchase(student.id, other.id, 50, "2026-03-15T00:00:00.000Z");
 
       const series = getRevenueSeries(
-        { courseId: other.id },
+        courseScope(other.id),
         parseRange("7d", NOW)
       );
 
@@ -654,13 +681,6 @@ describe("analyticsService", () => {
   });
 
   describe("getCourseSummaries", () => {
-    function rate(userId: number, courseId: number, rating: number) {
-      testDb
-        .insert(schema.courseRatings)
-        .values({ userId, courseId, rating })
-        .run();
-    }
-
     it("summarises each course's range revenue and enrollments, all-time completion and rating", () => {
       const [ann, bob, cat] = [
         createStudent(),
@@ -825,7 +845,7 @@ describe("analyticsService", () => {
         completion: { completed: 0, enrolled: 0, rate: null },
       });
       expect(
-        getRevenueSeries({ courseId: quiet.id }, parseRange("all", NOW))
+        getRevenueSeries(courseScope(quiet.id), parseRange("all", NOW))
       ).toEqual([]);
     });
 
@@ -836,7 +856,7 @@ describe("analyticsService", () => {
       purchase(student.id, sibling.id, 9999, "2026-02-10T00:00:00.000Z");
 
       const series = getRevenueSeries(
-        { courseId: base.course.id },
+        courseScope(base.course.id),
         parseRange("all", NOW)
       );
 
@@ -957,21 +977,6 @@ describe("analyticsService", () => {
   });
 
   describe("getQuizPassRates", () => {
-    function addQuiz(lessonId: number, title: string) {
-      return testDb
-        .insert(schema.quizzes)
-        .values({ lessonId, title, passingScore: 0.7 })
-        .returning()
-        .get();
-    }
-
-    function attempt(userId: number, quizId: number, passed: boolean) {
-      testDb
-        .insert(schema.quizAttempts)
-        .values({ userId, quizId, score: passed ? 0.9 : 0.4, passed })
-        .run();
-    }
-
     it("reports attempts, unique students and pass rate per quiz in course order", () => {
       const course = base.course;
       const module = addModule(course.id, 1);
@@ -1020,13 +1025,6 @@ describe("analyticsService", () => {
   });
 
   describe("getRatingBreakdown", () => {
-    function rate(userId: number, courseId: number, rating: number) {
-      testDb
-        .insert(schema.courseRatings)
-        .values({ userId, courseId, rating })
-        .run();
-    }
-
     it("counts each star value, including the ones nobody gave", () => {
       const sibling = createCourse();
       const students = Array.from({ length: 4 }, () => createStudent());
@@ -1048,6 +1046,15 @@ describe("analyticsService", () => {
           { stars: 1, count: 1 },
         ],
       });
+    });
+
+    it("reports nothing for a draft course", () => {
+      const draft = createCourse({ status: schema.CourseStatus.Draft });
+      rate(createStudent().id, draft.id, 5);
+
+      const breakdown = getRatingBreakdown(draft.id);
+      expect(breakdown.total).toBe(0);
+      expect(breakdown.average).toBeNull();
     });
 
     it("reports zero counts and no average for an unrated course", () => {

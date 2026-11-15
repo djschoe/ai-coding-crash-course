@@ -1,10 +1,5 @@
-import {
-  Link,
-  data,
-  isRouteErrorResponse,
-  useSearchParams,
-} from "react-router";
-import { AlertTriangle, BarChart3, Plus } from "lucide-react";
+import { Link, data, useSearchParams } from "react-router";
+import { BarChart3, Plus, Users } from "lucide-react";
 import type { Route } from "./+types/instructor.analytics";
 import { requireInstructorOrAdmin } from "~/lib/access.server";
 import { resolveAnalyticsInstructorId } from "~/lib/analytics-access";
@@ -16,9 +11,11 @@ import {
   getInstructorOverview,
   getRevenueByCountry,
   getRevenueSeries,
+  instructorScope,
   parseRange,
 } from "~/services/analyticsService";
 import {
+  AnalyticsError,
   CountryRevenueTable,
   CourseSummaryTable,
   HeadlineCards,
@@ -39,35 +36,46 @@ export function meta() {
 
 export async function loader({ request, url }: Route.LoaderArgs) {
   const viewer = await requireInstructorOrAdmin(request);
+  const range = parseRange(url.searchParams.get("range"));
+  const empty = {
+    viewingName: null as string | null,
+    range: range.key,
+    metrics: null,
+    report: null,
+  };
+
   const userId = resolveAnalyticsInstructorId(
-    viewer,
+    viewer.userId,
+    viewer.isAdmin,
     url.searchParams.get("instructorId")
   );
-  const viewing = userId === viewer.userId ? null : getUserById(userId);
-  if (viewing === undefined || viewing?.role === UserRole.Student) {
-    throw data("Instructor not found.", { status: 404 });
+  // Admins have no analytics of their own: they pick an instructor first.
+  if (userId === null) {
+    return { ...empty, needsInstructor: true, hasCourses: false };
   }
-  const viewingName = viewing?.name ?? null;
-  const range = parseRange(url.searchParams.get("range"));
+
+  let viewingName: string | null = null;
+  if (viewer.isAdmin) {
+    const target = getUserById(userId);
+    if (target?.role !== UserRole.Instructor) {
+      throw data("Instructor not found.", { status: 404 });
+    }
+    viewingName = target.name;
+  }
 
   const hasCourses = getCoursesByInstructor(userId).length > 0;
   if (!hasCourses) {
-    return {
-      hasCourses,
-      viewingName,
-      range: range.key,
-      metrics: null,
-      report: null,
-    };
+    return { ...empty, viewingName, needsInstructor: false, hasCourses };
   }
 
   return {
+    needsInstructor: false,
     hasCourses,
     viewingName,
     range: range.key,
     metrics: getInstructorOverview(userId, range),
     report: {
-      revenueSeries: getRevenueSeries({ instructorId: userId }, range),
+      revenueSeries: getRevenueSeries(instructorScope(userId), range),
       courseSummaries: getCourseSummaries(userId, range),
       countries: getRevenueByCountry(userId, range),
     },
@@ -77,7 +85,8 @@ export async function loader({ request, url }: Route.LoaderArgs) {
 export default function InstructorAnalytics({
   loaderData,
 }: Route.ComponentProps) {
-  const { hasCourses, viewingName, range, metrics, report } = loaderData;
+  const { needsInstructor, hasCourses, viewingName, range, metrics, report } =
+    loaderData;
   const [searchParams] = useSearchParams();
 
   return (
@@ -86,9 +95,11 @@ export default function InstructorAnalytics({
         <div>
           <h1 className="text-2xl font-bold sm:text-3xl">Analytics</h1>
           <p className="mt-1 text-muted-foreground">
-            {viewingName
-              ? `Viewing ${viewingName}'s published and archived courses (read-only)`
-              : "How your published and archived courses are performing"}
+            {needsInstructor
+              ? "Instructor analytics across published and archived courses"
+              : viewingName
+                ? `Viewing ${viewingName}'s published and archived courses (read-only)`
+                : "How your published and archived courses are performing"}
           </p>
         </div>
         {hasCourses && (
@@ -108,6 +119,21 @@ export default function InstructorAnalytics({
               <CountryRevenueTable rows={report.countries} range={range} />
             </div>
           </div>
+        </div>
+      ) : needsInstructor ? (
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <Users className="mb-4 size-12 text-muted-foreground/50" />
+          <h2 className="text-lg font-medium">Choose an instructor</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Pick an instructor from Manage Users and choose "View analytics" to
+            see their courses' performance.
+          </p>
+          <Link to="/admin/users" className="mt-4">
+            <Button>
+              <Users className="mr-2 size-4" />
+              Manage Users
+            </Button>
+          </Link>
         </div>
       ) : (
         <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -138,38 +164,12 @@ export default function InstructorAnalytics({
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
-  let title = "Something went wrong";
-  let message = "An unexpected error occurred while loading your analytics.";
-
-  if (isRouteErrorResponse(error)) {
-    if (error.status === 401) {
-      title = "Sign in required";
-      message =
-        typeof error.data === "string"
-          ? error.data
-          : "Please select a user from the DevUI panel.";
-    } else if (error.status === 403) {
-      title = "Not allowed";
-      message =
-        typeof error.data === "string"
-          ? error.data
-          : "You don't have access to this page.";
-    } else {
-      title = `Error ${error.status}`;
-      message = typeof error.data === "string" ? error.data : error.statusText;
-    }
-  }
-
   return (
-    <div className="flex min-h-[50vh] items-center justify-center p-6">
-      <div className="text-center">
-        <AlertTriangle className="mx-auto mb-4 size-12 text-muted-foreground" />
-        <h1 className="mb-2 text-2xl font-bold">{title}</h1>
-        <p className="mb-6 text-muted-foreground">{message}</p>
-        <Link to="/courses">
-          <Button>Browse Courses</Button>
-        </Link>
-      </div>
-    </div>
+    <AnalyticsError
+      error={error}
+      fallbackMessage="An unexpected error occurred while loading your analytics."
+      backTo="/courses"
+      backLabel="Browse Courses"
+    />
   );
 }

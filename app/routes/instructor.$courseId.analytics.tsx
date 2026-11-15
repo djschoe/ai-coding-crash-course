@@ -1,14 +1,10 @@
-import {
-  Link,
-  data,
-  isRouteErrorResponse,
-  useSearchParams,
-} from "react-router";
-import { AlertTriangle, ArrowLeft } from "lucide-react";
+import { Link, data, useSearchParams } from "react-router";
+import { ArrowLeft } from "lucide-react";
 import type { Route } from "./+types/instructor.$courseId.analytics";
-import { requireInstructorOrAdmin } from "~/lib/access.server";
+import { requireStaff, requireUserId } from "~/lib/access.server";
 import { getCourseById } from "~/services/courseService";
 import {
+  courseScope,
   getCourseAnalytics,
   getLessonFunnel,
   getQuizPassRates,
@@ -18,6 +14,7 @@ import {
 } from "~/services/analyticsService";
 import { CourseStatus } from "~/db/schema";
 import {
+  AnalyticsError,
   HeadlineCards,
   LessonFunnelSection,
   LowDataHint,
@@ -26,12 +23,11 @@ import {
   RatingBreakdownSection,
   RevenueChart,
 } from "~/components/analytics";
-import { Button } from "~/components/ui/button";
 
 // ─── Course Analytics ───
 // One course's headline metrics and revenue chart, filtered by the `range`
-// search param, then its all-time lesson funnel, ratings and quiz pass rates. Like the roster, only the course's instructor or an admin can
-// open it.
+// search param, then its all-time lesson funnel, ratings and quiz pass rates.
+// Like the roster, only the course's instructor or an admin can open it.
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const title = loaderData?.course.title ?? "Course";
@@ -39,7 +35,7 @@ export function meta({ loaderData }: Route.MetaArgs) {
 }
 
 export async function loader({ params, request, url }: Route.LoaderArgs) {
-  const viewer = await requireInstructorOrAdmin(request);
+  await requireUserId(request);
 
   const courseId = parseInt(params.courseId, 10);
   if (isNaN(courseId)) {
@@ -51,22 +47,18 @@ export async function loader({ params, request, url }: Route.LoaderArgs) {
     throw data("Course not found.", { status: 404 });
   }
 
-  if (course.instructorId !== viewer.userId && !viewer.isAdmin) {
-    throw data("You can only view analytics for your own courses.", {
-      status: 403,
-    });
-  }
+  // The course's own instructor or an admin; 403 for everyone else.
+  const access = await requireStaff(request, courseId);
 
   const range = parseRange(url.searchParams.get("range"));
 
   return {
     course: { id: course.id, title: course.title, status: course.status },
     // Admins viewing someone else's course go back to that instructor's overview.
-    instructorId:
-      course.instructorId === viewer.userId ? null : course.instructorId,
+    instructorId: access.isOwningInstructor ? null : course.instructorId,
     range: range.key,
     metrics: getCourseAnalytics(courseId, range),
-    revenueSeries: getRevenueSeries({ courseId }, range),
+    revenueSeries: getRevenueSeries(courseScope(courseId), range),
     // All time; these ignore the range.
     funnel: getLessonFunnel(courseId),
     ratings: getRatingBreakdown(courseId),
@@ -138,44 +130,13 @@ export default function CourseAnalytics({ loaderData }: Route.ComponentProps) {
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
-  let title = "Something went wrong";
-  let message = "An unexpected error occurred while loading course analytics.";
-
-  if (isRouteErrorResponse(error)) {
-    if (error.status === 401) {
-      title = "Sign in required";
-      message =
-        typeof error.data === "string"
-          ? error.data
-          : "Please select a user from the DevUI panel.";
-    } else if (error.status === 403) {
-      title = "Not allowed";
-      message =
-        typeof error.data === "string"
-          ? error.data
-          : "You don't have access to this page.";
-    } else if (error.status === 404) {
-      title = "Course not found";
-      message =
-        typeof error.data === "string"
-          ? error.data
-          : "The course you're looking for doesn't exist.";
-    } else {
-      title = `Error ${error.status}`;
-      message = typeof error.data === "string" ? error.data : error.statusText;
-    }
-  }
-
   return (
-    <div className="flex min-h-[50vh] items-center justify-center p-6">
-      <div className="text-center">
-        <AlertTriangle className="mx-auto mb-4 size-12 text-muted-foreground" />
-        <h1 className="mb-2 text-2xl font-bold">{title}</h1>
-        <p className="mb-6 text-muted-foreground">{message}</p>
-        <Link to="/instructor/analytics">
-          <Button>Back to Analytics</Button>
-        </Link>
-      </div>
-    </div>
+    <AnalyticsError
+      error={error}
+      fallbackMessage="An unexpected error occurred while loading course analytics."
+      notFoundTitle="Course not found"
+      backTo="/instructor/analytics"
+      backLabel="Back to Analytics"
+    />
   );
 }

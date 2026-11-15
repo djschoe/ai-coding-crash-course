@@ -1,16 +1,20 @@
 // ─── Analytics Access ───
 // Which instructor's analytics a viewer sees.
+//
+// Uses positional parameters (project convention).
 
 /**
- * Admins may view any instructor via the `instructorId` param; without a valid
- * id they see themselves. Instructors always see themselves, whatever the param.
+ * Instructors always see themselves, whatever the param. Admins see the
+ * instructor named by a valid `instructorId` param, or nobody (null) without
+ * one — they have no analytics of their own.
  */
 export function resolveAnalyticsInstructorId(
-  viewer: { userId: number; isAdmin: boolean },
+  viewerId: number,
+  isAdmin: boolean,
   instructorIdParam: string | null
-): number {
-  if (!viewer.isAdmin || !instructorIdParam) return viewer.userId;
-  if (!/^\d+$/.test(instructorIdParam)) return viewer.userId;
+): number | null {
+  if (!isAdmin) return viewerId;
+  if (!instructorIdParam || !/^\d+$/.test(instructorIdParam)) return null;
   const id = Number(instructorIdParam);
-  return id > 0 ? id : viewer.userId;
+  return id > 0 ? id : null;
 }

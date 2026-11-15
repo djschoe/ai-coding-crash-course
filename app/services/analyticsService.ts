@@ -100,7 +100,17 @@ export function parseRange(
 // ─── Scope & window helpers ───
 
 /** Which courses a metric covers: all of an instructor's, or a single one. */
-export type AnalyticsScope = { instructorId: number } | { courseId: number };
+export type AnalyticsScope =
+  | { kind: "instructor"; instructorId: number }
+  | { kind: "course"; courseId: number };
+
+export function instructorScope(instructorId: number): AnalyticsScope {
+  return { kind: "instructor", instructorId };
+}
+
+export function courseScope(courseId: number): AnalyticsScope {
+  return { kind: "course", courseId };
+}
 
 const INCLUDED_STATUSES = [CourseStatus.Published, CourseStatus.Archived];
 
@@ -108,10 +118,33 @@ const INCLUDED_STATUSES = [CourseStatus.Published, CourseStatus.Archived];
 function inScope(scope: AnalyticsScope) {
   return and(
     inArray(courses.status, INCLUDED_STATUSES),
-    "instructorId" in scope
+    scope.kind === "instructor"
       ? eq(courses.instructorId, scope.instructorId)
       : eq(courses.id, scope.courseId)
   );
+}
+
+/**
+ * The scope's lessons (lessons → modules → courses), with their course-order
+ * positions, as a subquery to join activity rows against.
+ */
+function scopedLessons(scope: AnalyticsScope) {
+  return db
+    .select({
+      lessonId: sql<number>`${lessons.id}`.as("scoped_lesson_id"),
+      lessonTitle: sql<string>`${lessons.title}`.as("scoped_lesson_title"),
+      lessonPosition: sql<number>`${lessons.position}`.as(
+        "scoped_lesson_position"
+      ),
+      modulePosition: sql<number>`${modules.position}`.as(
+        "scoped_module_position"
+      ),
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .innerJoin(courses, eq(modules.courseId, courses.id))
+    .where(inScope(scope))
+    .as("scoped_lessons");
 }
 
 function inWindow(at: SQLWrapper, window: TimeWindow): SQL {
@@ -199,21 +232,19 @@ function getActiveStudents(
   scope: AnalyticsScope,
   range: ParsedRange
 ): ComparedMetric {
+  const inScopeLessons = scopedLessons(scope);
+
   const completions = db
     .select({
       userId: sql<number>`${lessonProgress.userId}`.as("user_id"),
       at: sql<string>`${lessonProgress.completedAt}`.as("at"),
     })
     .from(lessonProgress)
-    .innerJoin(lessons, eq(lessonProgress.lessonId, lessons.id))
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(
-      and(
-        inScope(scope),
-        eq(lessonProgress.status, LessonProgressStatus.Completed)
-      )
-    );
+    .innerJoin(
+      inScopeLessons,
+      eq(inScopeLessons.lessonId, lessonProgress.lessonId)
+    )
+    .where(eq(lessonProgress.status, LessonProgressStatus.Completed));
 
   const watches = db
     .select({
@@ -221,10 +252,10 @@ function getActiveStudents(
       at: sql<string>`${videoWatchEvents.createdAt}`.as("at"),
     })
     .from(videoWatchEvents)
-    .innerJoin(lessons, eq(videoWatchEvents.lessonId, lessons.id))
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(inScope(scope));
+    .innerJoin(
+      inScopeLessons,
+      eq(inScopeLessons.lessonId, videoWatchEvents.lessonId)
+    );
 
   const attempts = db
     .select({
@@ -233,10 +264,7 @@ function getActiveStudents(
     })
     .from(quizAttempts)
     .innerJoin(quizzes, eq(quizAttempts.quizId, quizzes.id))
-    .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(inScope(scope));
+    .innerJoin(inScopeLessons, eq(inScopeLessons.lessonId, quizzes.lessonId));
 
   const activity = completions
     .unionAll(watches)
@@ -336,17 +364,23 @@ export interface HeadlineMetrics {
   completion: CompletionRate;
 }
 
-export function getInstructorOverview(
-  instructorId: number,
+function getHeadlineMetrics(
+  scope: AnalyticsScope,
   range: ParsedRange
 ): HeadlineMetrics {
-  const scope: AnalyticsScope = { instructorId };
   return {
     revenue: getRevenue(scope, range),
     enrollments: getEnrollments(scope, range),
     activeStudents: getActiveStudents(scope, range),
     completion: getCompletionRate(scope),
   };
+}
+
+export function getInstructorOverview(
+  instructorId: number,
+  range: ParsedRange
+): HeadlineMetrics {
+  return getHeadlineMetrics(instructorScope(instructorId), range);
 }
 
 /**
@@ -357,13 +391,7 @@ export function getCourseAnalytics(
   courseId: number,
   range: ParsedRange
 ): HeadlineMetrics {
-  const scope: AnalyticsScope = { courseId };
-  return {
-    revenue: getRevenue(scope, range),
-    enrollments: getEnrollments(scope, range),
-    activeStudents: getActiveStudents(scope, range),
-    completion: getCompletionRate(scope),
-  };
+  return getHeadlineMetrics(courseScope(courseId), range);
 }
 
 // ─── Revenue series ───
@@ -455,7 +483,7 @@ export function getCourseSummaries(
   instructorId: number,
   range: ParsedRange
 ): CourseSummary[] {
-  const scope: AnalyticsScope = { instructorId };
+  const scope = instructorScope(instructorId);
 
   const revenue = db
     .select({
@@ -549,7 +577,7 @@ export function getRevenueByCountry(
     .innerJoin(courses, eq(purchases.courseId, courses.id))
     .where(
       and(
-        inScope({ instructorId }),
+        inScope(instructorScope(instructorId)),
         inWindow(purchases.createdAt, range.current)
       )
     )
@@ -592,7 +620,7 @@ export interface LessonFunnel {
  * enrollments. Two queries: the enrolled total and the per-lesson counts.
  */
 export function getLessonFunnel(courseId: number): LessonFunnel {
-  const scope: AnalyticsScope = { courseId };
+  const scope = courseScope(courseId);
 
   const enrolledRow = db
     .select({ total: sql<number>`count(*)` })
@@ -676,23 +704,25 @@ export interface QuizPassRate {
  * in module, then lesson, position order. One query.
  */
 export function getQuizPassRates(courseId: number): QuizPassRate[] {
+  const inScopeLessons = scopedLessons(courseScope(courseId));
   const rows = db
     .select({
       quizId: quizzes.id,
       title: quizzes.title,
-      lessonTitle: lessons.title,
+      lessonTitle: inScopeLessons.lessonTitle,
       attempts: sql<number>`count(${quizAttempts.id})`,
       students: sql<number>`count(distinct ${quizAttempts.userId})`,
       passed: sql<number>`coalesce(sum(case when ${quizAttempts.passed} then 1 else 0 end), 0)`,
     })
     .from(quizzes)
-    .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
+    .innerJoin(inScopeLessons, eq(inScopeLessons.lessonId, quizzes.lessonId))
     .leftJoin(quizAttempts, eq(quizAttempts.quizId, quizzes.id))
-    .where(inScope({ courseId }))
     .groupBy(quizzes.id)
-    .orderBy(modules.position, lessons.position, quizzes.id)
+    .orderBy(
+      sql`${inScopeLessons.modulePosition}`,
+      sql`${inScopeLessons.lessonPosition}`,
+      quizzes.id
+    )
     .all();
 
   return rows.map((row) => ({
@@ -713,7 +743,10 @@ export interface RatingBreakdown {
 
 const STAR_VALUES = [5, 4, 3, 2, 1] as const;
 
-/** All-time count of each star rating for one course. One query. */
+/**
+ * All-time count of each star rating for one course. Draft courses report no
+ * ratings. One query.
+ */
 export function getRatingBreakdown(courseId: number): RatingBreakdown {
   const rows = db
     .select({
@@ -721,7 +754,8 @@ export function getRatingBreakdown(courseId: number): RatingBreakdown {
       count: sql<number>`count(*)`,
     })
     .from(courseRatings)
-    .where(eq(courseRatings.courseId, courseId))
+    .innerJoin(courses, eq(courseRatings.courseId, courses.id))
+    .where(inScope(courseScope(courseId)))
     .groupBy(courseRatings.rating)
     .all();
 
